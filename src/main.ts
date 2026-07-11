@@ -7,8 +7,10 @@ const ENEMY_SPEED = 70;
 const ELITE_SPEED = 55;
 const PROJECTILE_SPEED = 420;
 const FIRE_INTERVAL = 350;
-// 멈췄을 때 세상이 흐르는 최소 배율. 0이면 물리 엔진 나눗셈이 터진다.
-const IDLE_TIME_SCALE = 0.12;
+// 불릿타임 중 세상 배율. 0이면 물리 엔진 나눗셈이 터진다.
+const BULLET_TIME_SCALE = 0.2;
+// 불릿타임 유지 비용: 게이지 1칸이 버티는 시간.
+const BULLET_DRAIN_MS = 1500;
 // 콤보는 실시간으로 식는다 — 시간을 멈춰도 보존되지 않는 게 핵심 규칙.
 const COMBO_WINDOW_MS = 2500;
 const GAUGE_MAX = 3;
@@ -31,6 +33,9 @@ class PrototypeScene extends Phaser.Scene {
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private wasd!: Record<'up' | 'down' | 'left' | 'right', Phaser.Input.Keyboard.Key>;
   private dashKey!: Phaser.Input.Keyboard.Key;
+  private bulletKey!: Phaser.Input.Keyboard.Key;
+  private pauseOverlay!: Phaser.GameObjects.Container;
+  private paused = false;
   private dim!: Phaser.GameObjects.Rectangle;
   private hud!: Phaser.GameObjects.Text;
   private comboBar!: Phaser.GameObjects.Rectangle;
@@ -48,6 +53,7 @@ class PrototypeScene extends Phaser.Scene {
 
   create() {
     this.dead = false;
+    this.paused = false;
     this.worldSpeed = 1;
     this.score = 0;
     this.combo = 0;
@@ -104,12 +110,28 @@ class PrototypeScene extends Phaser.Scene {
       );
     }
     this.add
-      .text(WIDTH / 2, HEIGHT - 28, '이동: WASD/방향키 · 대시: 스페이스 — 움직일 때만 시간이 흐른다', {
-        fontSize: '15px',
-        color: '#9aa0b0',
-      })
+      .text(
+        WIDTH / 2,
+        HEIGHT - 28,
+        '이동 WASD · 대시 스페이스 · 불릿타임 Shift 홀드 · 일시정지 ESC — 멈춰 서면 집중이 차오른다',
+        { fontSize: '15px', color: '#9aa0b0' },
+      )
       .setOrigin(0.5)
       .setDepth(11);
+
+    this.pauseOverlay = this.add
+      .container(0, 0, [
+        this.add.rectangle(0, 0, WIDTH, HEIGHT, 0x05060a, 0.7).setOrigin(0),
+        this.add
+          .text(WIDTH / 2, HEIGHT / 2, '일시정지\nESC — 재개', {
+            fontSize: '28px',
+            color: '#e8e8f0',
+            align: 'center',
+          })
+          .setOrigin(0.5),
+      ])
+      .setDepth(30)
+      .setVisible(false);
 
     const kb = this.input.keyboard!;
     this.cursors = kb.createCursorKeys();
@@ -120,11 +142,26 @@ class PrototypeScene extends Phaser.Scene {
       right: kb.addKey(Phaser.Input.Keyboard.KeyCodes.D),
     };
     this.dashKey = kb.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+    this.bulletKey = kb.addKey(Phaser.Input.Keyboard.KeyCodes.SHIFT);
     kb.addKey(Phaser.Input.Keyboard.KeyCodes.R).on('down', () => this.scene.restart());
+    kb.addKey(Phaser.Input.Keyboard.KeyCodes.ESC).on('down', () => this.togglePause());
+  }
+
+  private togglePause() {
+    if (this.dead) return;
+    this.paused = !this.paused;
+    this.pauseOverlay.setVisible(this.paused);
+    if (this.paused) {
+      this.physics.pause();
+      this.time.paused = true;
+    } else {
+      this.physics.resume();
+      this.time.paused = false;
+    }
   }
 
   update(_time: number, deltaMs: number) {
-    if (this.dead) return;
+    if (this.dead || this.paused) return;
     const now = this.time.now;
 
     const dir = new Phaser.Math.Vector2(
@@ -142,8 +179,10 @@ class PrototypeScene extends Phaser.Scene {
       this.invincibleUntil = now + DASH_IFRAME_MS;
     }
 
-    const moving = dir.lengthSq() > 0 || dashing;
-    const target = moving ? 1 : IDLE_TIME_SCALE;
+    // 세상은 항상 정상 속도. 슬로우모는 Shift 홀드로 게이지를 태울 때만 (ADR-0003).
+    const bulletActive = this.bulletKey.isDown && this.gauge > 0;
+    if (bulletActive) this.gauge = Math.max(0, this.gauge - deltaMs / BULLET_DRAIN_MS);
+    const target = bulletActive ? BULLET_TIME_SCALE : 1;
     const lerp = 1 - Math.exp(-10 * (deltaMs / 1000));
     this.worldSpeed = Phaser.Math.Linear(this.worldSpeed, target, lerp);
 
@@ -151,18 +190,20 @@ class PrototypeScene extends Phaser.Scene {
     this.physics.world.timeScale = 1 / this.worldSpeed;
     this.time.timeScale = this.worldSpeed;
 
-    // 플레이어는 실시간 속도 유지: 물리 감속을 역보정해서 SUPERHOT 감각을 만든다.
+    // 플레이어는 실시간 속도 유지: 물리 감속을 역보정해서 슬로우모 속 우위를 만든다.
     const speed = (dashing ? PLAYER_SPEED * 3.2 : PLAYER_SPEED) / this.worldSpeed;
     const move = dashing && dir.lengthSq() === 0 ? this.lastDir : dir;
     this.player.setVelocity(move.x * speed, move.y * speed);
     this.player.setAlpha(now < this.invincibleUntil ? 0.4 : 1);
 
-    // 콤보·게이지는 실시간 진행 — 시간 흐름과 무관한 것이 이 게임의 저울이다.
+    // 콤보는 실시간으로 식는다 — 불릿타임으로도 보존 불가.
     if (this.combo > 0) {
       this.comboTimeLeft -= deltaMs;
       if (this.comboTimeLeft <= 0) this.combo = 0;
     }
-    if (this.worldSpeed < 0.35 && this.gauge < GAUGE_MAX) {
+    // 충전은 완전히 멈춰 서 있을 때만 — 세상이 정상 속도로 다가오는 동안의 투자다.
+    const standing = dir.lengthSq() === 0 && !dashing && !bulletActive;
+    if (standing && this.gauge < GAUGE_MAX) {
       this.gauge = Math.min(GAUGE_MAX, this.gauge + deltaMs / GAUGE_CHARGE_MS);
     }
 
