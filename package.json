@@ -1,0 +1,18 @@
+{
+  "name": "nan2026-game",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "phaser": "^3.90.0"
+  },
+  "devDependencies": {
+    "typescript": "~5.8.0",
+    "vite": "^7.0.0"
+  }
+}
