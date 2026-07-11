@@ -284,7 +284,7 @@ class PrototypeScene extends Phaser.Scene {
       this.registry.set('guideSeen', true);
       const guide = this.add
         .container(0, 0, [
-          this.add.rectangle(WIDTH / 2, 170, 560, 130, 0x05060a, 0.82).setStrokeStyle(1, 0x4fc3f7),
+          this.add.rectangle(WIDTH / 2, 170, 560, 130, 0x05060a, 0.35).setStrokeStyle(1, 0x4fc3f7, 0.4),
           this.add
             .text(
               WIDTH / 2,
@@ -292,7 +292,8 @@ class PrototypeScene extends Phaser.Scene {
               '스페이스 — 대시: 무적으로 적 벽을 뚫는다\nShift 홀드 — 불릿타임: 세상만 느려지고 나는 그대로\n멈춰 서면 파란 집중 게이지가 차오른다 (둘의 연료)',
               { fontSize: '17px', color: '#e8e8f0', align: 'center', lineSpacing: 10 },
             )
-            .setOrigin(0.5),
+            .setOrigin(0.5)
+            .setAlpha(0.9),
         ])
         .setDepth(25);
       this.tweens.add({
