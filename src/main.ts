@@ -3,9 +3,15 @@ import Phaser from 'phaser';
 const WIDTH = 960;
 const HEIGHT = 540;
 const PLAYER_SPEED = 220;
-const ENEMY_SPEED = 95;
 const ELITE_SPEED = 75;
 const PROJECTILE_SPEED = 380;
+// 예측자: 플레이어 실속도 × 리드 시간 지점을 조준 — 경로 탐색 없이 "앞을 막는" 체감.
+const INTERCEPT_LEAD_SEC = 0.6;
+// 돌진자: 사거리 안에서 경고 점멸 후 직선 돌진. 경고가 공정성을 만든다.
+const CHARGER_RANGE = 250;
+const CHARGER_WINDUP_MS = 650;
+const CHARGER_CHARGE_MS = 700;
+const CHARGER_CHARGE_SPEED = 330;
 // 시작은 약하게 — 초반은 도망과 수집이 본업, 성장이 재미를 견인한다.
 const START_FIRE_INTERVAL = 900;
 const START_MAGNET_RADIUS = 60;
@@ -32,10 +38,26 @@ const PULSE_INTERVAL_MS = 45_000;
 const VALLEY_MS = 10_000;
 const SPEED_GROWTH = 0.002; // 초당 적 속도 증가율 (선형, 상한 1.6배)
 
+type EnemyKind = 'chaser' | 'inter' | 'tank' | 'charger';
+
+const KIND_STATS: Record<
+  EnemyKind,
+  { tex: string; hp: number; speed: number; score: number; gems: number }
+> = {
+  chaser: { tex: 'enemy', hp: 1, speed: 95, score: 10, gems: 1 },
+  inter: { tex: 'inter', hp: 1, speed: 105, score: 15, gems: 1 },
+  tank: { tex: 'tank', hp: 3, speed: 55, score: 20, gems: 2 },
+  charger: { tex: 'charger', hp: 2, speed: 80, score: 20, gems: 2 },
+};
+
 type Enemy = Phaser.Types.Physics.Arcade.ImageWithDynamicBody & {
   hp?: number;
   elite?: boolean;
   bornAt?: number;
+  kind?: EnemyKind;
+  mode?: 'seek' | 'windup' | 'charge';
+  modeUntil?: number;
+  chargeDir?: Phaser.Math.Vector2;
 };
 
 type UpgradeDef = {
@@ -171,6 +193,9 @@ class PrototypeScene extends Phaser.Scene {
     const g = this.add.graphics();
     g.fillStyle(0xf2f2f2).fillRect(0, 0, 16, 16).generateTexture('player', 16, 16);
     g.clear().fillStyle(0xe4573d).fillCircle(8, 8, 8).generateTexture('enemy', 16, 16);
+    g.clear().fillStyle(0xf5a623).fillTriangle(8, 0, 16, 16, 0, 16).generateTexture('inter', 16, 16);
+    g.clear().fillStyle(0x7a3b2e).fillCircle(11, 11, 11).generateTexture('tank', 22, 22);
+    g.clear().fillStyle(0x9b59b6).fillRect(0, 0, 16, 16).generateTexture('charger', 16, 16);
     g.clear().fillStyle(0x8c2318).fillCircle(14, 14, 14).generateTexture('elite', 28, 28);
     g.clear().fillStyle(0xffd23f).fillRect(0, 0, 8, 4).generateTexture('projectile', 8, 4);
     g.clear().fillStyle(0x5be07a).fillRect(2, 0, 4, 8).fillRect(0, 2, 8, 4).generateTexture('gem', 8, 8);
@@ -354,12 +379,62 @@ class PrototypeScene extends Phaser.Scene {
     }
 
     const speedMul = Math.min(1.6, 1 + this.elapsedSec() * SPEED_GROWTH);
+    // 플레이어 실제 화면 속도 (물리 역보정 되돌림) — 예측자 리드 조준용.
+    const realVelX = this.player.body.velocity.x * this.worldSpeed;
+    const realVelY = this.player.body.velocity.y * this.worldSpeed;
     this.enemies.getChildren().forEach((obj) => {
       const enemy = obj as Enemy;
-      const aim = new Phaser.Math.Vector2(this.player.x - enemy.x, this.player.y - enemy.y)
-        .normalize()
-        .scale((enemy.elite ? ELITE_SPEED : ENEMY_SPEED) * speedMul);
-      enemy.setVelocity(aim.x, aim.y);
+      const seek = (tx: number, ty: number, spd: number) => {
+        const aim = new Phaser.Math.Vector2(tx - enemy.x, ty - enemy.y).normalize().scale(spd);
+        enemy.setVelocity(aim.x, aim.y);
+      };
+      if (enemy.elite) {
+        seek(this.player.x, this.player.y, ELITE_SPEED * speedMul);
+        return;
+      }
+      const stats = KIND_STATS[enemy.kind ?? 'chaser'];
+      const spd = stats.speed * speedMul;
+      switch (enemy.kind) {
+        case 'inter':
+          seek(
+            this.player.x + realVelX * INTERCEPT_LEAD_SEC,
+            this.player.y + realVelY * INTERCEPT_LEAD_SEC,
+            spd,
+          );
+          break;
+        case 'charger': {
+          if (enemy.mode === 'windup') {
+            enemy.setVelocity(0, 0);
+            enemy.setAlpha(0.4 + 0.6 * Math.abs(Math.sin(now / 60)));
+            if (now >= (enemy.modeUntil ?? 0)) {
+              enemy.mode = 'charge';
+              enemy.modeUntil = now + CHARGER_CHARGE_MS;
+              enemy.chargeDir = new Phaser.Math.Vector2(
+                this.player.x - enemy.x,
+                this.player.y - enemy.y,
+              ).normalize();
+              enemy.setAlpha(1);
+            }
+          } else if (enemy.mode === 'charge') {
+            const d = enemy.chargeDir!;
+            enemy.setVelocity(
+              d.x * CHARGER_CHARGE_SPEED * speedMul,
+              d.y * CHARGER_CHARGE_SPEED * speedMul,
+            );
+            if (now >= (enemy.modeUntil ?? 0)) enemy.mode = 'seek';
+          } else {
+            seek(this.player.x, this.player.y, spd);
+            const dist = Phaser.Math.Distance.Between(enemy.x, enemy.y, this.player.x, this.player.y);
+            if (dist < CHARGER_RANGE) {
+              enemy.mode = 'windup';
+              enemy.modeUntil = now + CHARGER_WINDUP_MS;
+            }
+          }
+          break;
+        }
+        default:
+          seek(this.player.x, this.player.y, spd);
+      }
     });
 
     this.projectiles.getChildren().forEach((obj) => {
@@ -413,11 +488,12 @@ class PrototypeScene extends Phaser.Scene {
     proj.destroy();
     enemy.hp = (enemy.hp ?? 1) - this.damage;
     if (enemy.hp > 0) return;
-    const gain = enemy.elite ? 50 : 10;
+    const stats = KIND_STATS[enemy.kind ?? 'chaser'];
+    const gain = enemy.elite ? 50 : stats.score;
     this.combo += 1;
     this.comboTimeLeft = COMBO_WINDOW_MS;
     this.score += Math.round(gain * (1 + this.combo * 0.1));
-    this.dropGems(enemy.x, enemy.y, enemy.elite ? 3 : 1);
+    this.dropGems(enemy.x, enemy.y, enemy.elite ? 3 : stats.gems);
     enemy.destroy();
   }
 
@@ -628,6 +704,16 @@ class PrototypeScene extends Phaser.Scene {
     }
   }
 
+  // 시간에 따라 스폰 구성이 바뀐다: 추적자만 → +예측자(45초) → +탱커(90초) → +돌진자(150초).
+  private pickKind(): EnemyKind {
+    const t = this.elapsedSec();
+    const roll = Math.random() * 100;
+    if (t < 45) return 'chaser';
+    if (t < 90) return roll < 25 ? 'inter' : 'chaser';
+    if (t < 150) return roll < 25 ? 'inter' : roll < 45 ? 'tank' : 'chaser';
+    return roll < 25 ? 'inter' : roll < 40 ? 'tank' : roll < 55 ? 'charger' : 'chaser';
+  }
+
   private spawnEnemy() {
     const edge = Phaser.Math.Between(0, 3);
     const x = edge === 0 ? -20 : edge === 1 ? WIDTH + 20 : Phaser.Math.Between(0, WIDTH);
@@ -637,8 +723,12 @@ class PrototypeScene extends Phaser.Scene {
 
   private spawnEnemyAt(x: number, y: number) {
     if (this.dead) return;
-    const enemy = this.physics.add.image(x, y, 'enemy') as Enemy;
-    enemy.hp = 1;
+    const kind = this.pickKind();
+    const stats = KIND_STATS[kind];
+    const enemy = this.physics.add.image(x, y, stats.tex) as Enemy;
+    enemy.kind = kind;
+    enemy.hp = stats.hp;
+    enemy.mode = 'seek';
     enemy.bornAt = this.time.now;
     this.enemies.add(enemy);
   }
