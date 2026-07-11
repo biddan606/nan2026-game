@@ -100,11 +100,16 @@ class PrototypeScene extends Phaser.Scene {
   private choosing = false;
   private xpBar!: Phaser.GameObjects.Rectangle;
   private levelUpUI?: Phaser.GameObjects.Container;
+  private levelKeys: Phaser.Input.Keyboard.Key[] = [];
 
   create() {
     this.dead = false;
     this.paused = false;
     this.choosing = false;
+    // 일시정지·레벨업 도중 R 재시작 시 정지 상태가 새 런을 오염시키지 않게 명시 해제.
+    this.time.paused = false;
+    this.physics.resume();
+    this.levelKeys = [];
     this.worldSpeed = 1;
     this.score = 0;
     this.combo = 0;
@@ -445,18 +450,30 @@ class PrototypeScene extends Phaser.Scene {
     });
     this.levelUpUI = this.add.container(0, 0, parts).setDepth(40);
 
-    const keys = [
-      Phaser.Input.Keyboard.KeyCodes.ONE,
-      Phaser.Input.Keyboard.KeyCodes.TWO,
-      Phaser.Input.Keyboard.KeyCodes.THREE,
+    // 상단 숫자열 + 넘패드 둘 다. 리스너는 chooseUpgrade에서 반드시 정리 —
+    // 마우스로 고르면 키 리스너가 살아남아 다음 레벨업에 유령 입력을 만든다.
+    const keyRows = [
+      [Phaser.Input.Keyboard.KeyCodes.ONE, Phaser.Input.Keyboard.KeyCodes.NUMPAD_ONE],
+      [Phaser.Input.Keyboard.KeyCodes.TWO, Phaser.Input.Keyboard.KeyCodes.NUMPAD_TWO],
+      [Phaser.Input.Keyboard.KeyCodes.THREE, Phaser.Input.Keyboard.KeyCodes.NUMPAD_THREE],
     ];
+    this.levelKeys = [];
     picks.forEach((def, i) => {
-      this.input.keyboard!.addKey(keys[i]).once('down', () => this.chooseUpgrade(def));
+      keyRows[i].forEach((code) => {
+        const key = this.input.keyboard!.addKey(code);
+        key.once('down', () => this.chooseUpgrade(def));
+        this.levelKeys.push(key);
+      });
     });
   }
 
   private chooseUpgrade(def: UpgradeDef) {
     if (!this.choosing) return;
+    this.levelKeys.forEach((key) => {
+      key.removeAllListeners();
+      this.input.keyboard!.removeKey(key);
+    });
+    this.levelKeys = [];
     this.stacks[def.key] = (this.stacks[def.key] ?? 0) + 1;
     def.apply(this);
     if (def.key === 'gauge') this.buildGaugePips();
