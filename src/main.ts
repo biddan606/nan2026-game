@@ -41,18 +41,58 @@ type Enemy = Phaser.Types.Physics.Arcade.ImageWithDynamicBody & {
 type UpgradeDef = {
   key: string;
   name: string;
-  desc: string;
+  blurb: string; // 이 스탯이 무엇인지 평문 설명
   max?: number;
   apply: (s: PrototypeScene) => void;
+  info: (s: PrototypeScene) => string; // 지금 → 다음 수치 미리보기
 };
 
 const UPGRADE_DEFS: UpgradeDef[] = [
-  { key: 'rate', name: '공속', desc: '공격 간격 −15%', apply: (s) => (s.fireInterval *= 0.85) },
-  { key: 'multi', name: '갈래', desc: '투사체 +1', max: 3, apply: (s) => (s.projectileCount += 1) },
-  { key: 'dmg', name: '피해', desc: '피해 +1', apply: (s) => (s.damage += 1) },
-  { key: 'speed', name: '신속', desc: '이동 속도 +10%', max: 5, apply: (s) => (s.moveSpeed *= 1.1) },
-  { key: 'gauge', name: '집중', desc: '게이지 최대 +1', max: 3, apply: (s) => (s.gaugeMax += 1) },
-  { key: 'magnet', name: '자석', desc: '수집 반경 +40%', apply: (s) => (s.magnetRadius *= 1.4) },
+  {
+    key: 'rate',
+    name: '공속',
+    blurb: '자동 공격이 더 자주 나간다.',
+    apply: (s) => (s.fireInterval *= 0.85),
+    info: (s) => `발사 간격 ${(s.fireInterval / 1000).toFixed(2)}초 → ${((s.fireInterval * 0.85) / 1000).toFixed(2)}초`,
+  },
+  {
+    key: 'multi',
+    name: '갈래',
+    blurb: '투사체가 부채꼴로 한 발 더 나간다.',
+    max: 3,
+    apply: (s) => (s.projectileCount += 1),
+    info: (s) => `한 번에 ${s.projectileCount}발 → ${s.projectileCount + 1}발`,
+  },
+  {
+    key: 'dmg',
+    name: '피해',
+    blurb: '투사체 한 발의 위력이 커진다. 엘리트를 빨리 뚫는 열쇠.',
+    apply: (s) => (s.damage += 1),
+    info: (s) => `피해 ${s.damage} → ${s.damage + 1}`,
+  },
+  {
+    key: 'speed',
+    name: '신속',
+    blurb: '이동 속도가 빨라진다. 대시 거리도 함께 늘어난다.',
+    max: 5,
+    apply: (s) => (s.moveSpeed *= 1.1),
+    info: (s) => `이동 속도 ${Math.round(s.moveSpeed)} → ${Math.round(s.moveSpeed * 1.1)}`,
+  },
+  {
+    key: 'gauge',
+    name: '집중',
+    blurb: '멈춰 서 있으면 차오르는 파란 게이지 — 대시(스페이스)와 불릿타임(Shift)의 연료.',
+    max: 3,
+    apply: (s) => (s.gaugeMax += 1),
+    info: (s) => `게이지 최대 ${s.gaugeMax}칸 → ${s.gaugeMax + 1}칸`,
+  },
+  {
+    key: 'magnet',
+    name: '자석',
+    blurb: 'XP 보석을 끌어당기는 반경이 넓어진다.',
+    apply: (s) => (s.magnetRadius *= 1.4),
+    info: (s) => `수집 반경 ${Math.round(s.magnetRadius)} → ${Math.round(s.magnetRadius * 1.4)}`,
+  },
 ];
 
 class PrototypeScene extends Phaser.Scene {
@@ -416,32 +456,45 @@ class PrototypeScene extends Phaser.Scene {
     const parts: Phaser.GameObjects.GameObject[] = [
       this.add.rectangle(0, 0, WIDTH, HEIGHT, 0x05060a, 0.75).setOrigin(0),
       this.add
-        .text(WIDTH / 2, HEIGHT / 2 - 120, `레벨 ${this.level}!  업그레이드 선택`, {
+        .text(WIDTH / 2, HEIGHT / 2 - 150, `레벨 ${this.level}!  업그레이드 선택`, {
           fontSize: '26px',
           color: '#e8e8f0',
         })
         .setOrigin(0.5),
+      this.add
+        .text(WIDTH / 2, HEIGHT / 2 + 135, '1 · 2 · 3 키 또는 클릭으로 선택', {
+          fontSize: '14px',
+          color: '#9aa0b0',
+        })
+        .setOrigin(0.5),
     ];
     picks.forEach((def, i) => {
-      const x = WIDTH / 2 + (i - (picks.length - 1) / 2) * 220;
+      const x = WIDTH / 2 + (i - (picks.length - 1) / 2) * 300;
+      const cy = HEIGHT / 2;
       const card = this.add
-        .rectangle(x, HEIGHT / 2, 190, 130, 0x1e2230)
+        .rectangle(x, cy, 260, 190, 0x1e2230)
         .setStrokeStyle(2, 0x4fc3f7)
         .setInteractive({ useHandCursor: true });
       card.on('pointerdown', () => this.chooseUpgrade(def));
+      const owned = this.stacks[def.key] ?? 0;
       parts.push(
         card,
         this.add
-          .text(x, HEIGHT / 2 - 30, `${i + 1}. ${def.name}`, {
-            fontSize: '22px',
-            color: '#ffd23f',
+          .text(x, cy - 68, `${i + 1}. ${def.name}`, { fontSize: '22px', color: '#ffd23f' })
+          .setOrigin(0.5),
+        this.add
+          .text(x, cy - 28, def.blurb, {
+            fontSize: '14px',
+            color: '#c9cede',
+            align: 'center',
+            wordWrap: { width: 230 },
           })
+          .setOrigin(0.5, 0),
+        this.add
+          .text(x, cy + 45, def.info(this), { fontSize: '16px', color: '#5be07a' })
           .setOrigin(0.5),
         this.add
-          .text(x, HEIGHT / 2 + 10, def.desc, { fontSize: '15px', color: '#c9cede' })
-          .setOrigin(0.5),
-        this.add
-          .text(x, HEIGHT / 2 + 42, `보유 ${this.stacks[def.key] ?? 0}`, {
+          .text(x, cy + 75, `보유 ${owned}${def.max ? ` / 최대 ${def.max}` : ''}`, {
             fontSize: '13px',
             color: '#9aa0b0',
           })
