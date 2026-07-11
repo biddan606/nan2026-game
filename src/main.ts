@@ -6,7 +6,12 @@ const PLAYER_SPEED = 220;
 const ENEMY_SPEED = 70;
 const ELITE_SPEED = 55;
 const PROJECTILE_SPEED = 420;
-const FIRE_INTERVAL = 350;
+// 시작은 약하게 — 초반은 도망과 수집이 본업, 성장이 재미를 견인한다.
+const START_FIRE_INTERVAL = 900;
+const START_MAGNET_RADIUS = 60;
+const COLLECT_RADIUS = 20;
+const GEM_PULL_SPEED = 340;
+const MAX_GEMS = 200;
 // 불릿타임 중 세상 배율. 0이면 물리 엔진 나눗셈이 터진다.
 const BULLET_TIME_SCALE = 0.2;
 // 불릿타임 유지 비용: 게이지 1칸이 버티는 시간.
@@ -32,6 +37,23 @@ type Enemy = Phaser.Types.Physics.Arcade.ImageWithDynamicBody & {
   elite?: boolean;
   bornAt?: number;
 };
+
+type UpgradeDef = {
+  key: string;
+  name: string;
+  desc: string;
+  max?: number;
+  apply: (s: PrototypeScene) => void;
+};
+
+const UPGRADE_DEFS: UpgradeDef[] = [
+  { key: 'rate', name: '공속', desc: '공격 간격 −15%', apply: (s) => (s.fireInterval *= 0.85) },
+  { key: 'multi', name: '갈래', desc: '투사체 +1', max: 3, apply: (s) => (s.projectileCount += 1) },
+  { key: 'dmg', name: '피해', desc: '피해 +1', apply: (s) => (s.damage += 1) },
+  { key: 'speed', name: '신속', desc: '이동 속도 +10%', max: 5, apply: (s) => (s.moveSpeed *= 1.1) },
+  { key: 'gauge', name: '집중', desc: '게이지 최대 +1', max: 3, apply: (s) => (s.gaugeMax += 1) },
+  { key: 'magnet', name: '자석', desc: '수집 반경 +40%', apply: (s) => (s.magnetRadius *= 1.4) },
+];
 
 class PrototypeScene extends Phaser.Scene {
   private player!: Phaser.Types.Physics.Arcade.ImageWithDynamicBody;
@@ -62,14 +84,43 @@ class PrototypeScene extends Phaser.Scene {
   private nextPulseAt = 0;
   private valleyUntil = 0;
 
+  // 성장 스탯 — 업그레이드가 만진다 (UPGRADE_DEFS에서 접근하므로 public).
+  fireInterval = START_FIRE_INTERVAL;
+  projectileCount = 1;
+  damage = 1;
+  moveSpeed = PLAYER_SPEED;
+  gaugeMax = GAUGE_MAX;
+  magnetRadius = START_MAGNET_RADIUS;
+
+  private fireCooldown = 0;
+  private level = 1;
+  private xp = 0;
+  private gems: Phaser.GameObjects.Image[] = [];
+  private stacks: Record<string, number> = {};
+  private choosing = false;
+  private xpBar!: Phaser.GameObjects.Rectangle;
+  private levelUpUI?: Phaser.GameObjects.Container;
+
   create() {
     this.dead = false;
     this.paused = false;
+    this.choosing = false;
     this.worldSpeed = 1;
     this.score = 0;
     this.combo = 0;
     this.comboTimeLeft = 0;
-    this.gauge = GAUGE_MAX;
+    this.fireInterval = START_FIRE_INTERVAL;
+    this.projectileCount = 1;
+    this.damage = 1;
+    this.moveSpeed = PLAYER_SPEED;
+    this.gaugeMax = GAUGE_MAX;
+    this.magnetRadius = START_MAGNET_RADIUS;
+    this.fireCooldown = this.fireInterval;
+    this.level = 1;
+    this.xp = 0;
+    this.gems = [];
+    this.stacks = {};
+    this.gauge = this.gaugeMax;
     this.gaugePips = [];
 
     const g = this.add.graphics();
@@ -77,6 +128,7 @@ class PrototypeScene extends Phaser.Scene {
     g.clear().fillStyle(0xe4573d).fillCircle(8, 8, 8).generateTexture('enemy', 16, 16);
     g.clear().fillStyle(0x8c2318).fillCircle(14, 14, 14).generateTexture('elite', 28, 28);
     g.clear().fillStyle(0xffd23f).fillRect(0, 0, 8, 4).generateTexture('projectile', 8, 4);
+    g.clear().fillStyle(0x5be07a).fillRect(2, 0, 4, 8).fillRect(0, 2, 8, 4).generateTexture('gem', 8, 8);
     g.destroy();
 
     this.player = this.physics.add.image(WIDTH / 2, HEIGHT / 2, 'player');
@@ -90,7 +142,6 @@ class PrototypeScene extends Phaser.Scene {
     this.nextPulseAt = this.runStart + PULSE_INTERVAL_MS;
     this.valleyUntil = 0;
     this.time.addEvent({ delay: DIRECTOR_TICK_MS, loop: true, callback: () => this.directorTick() });
-    this.time.addEvent({ delay: FIRE_INTERVAL, loop: true, callback: () => this.fire() });
 
     this.physics.add.overlap(this.player, this.enemies, () => this.onPlayerHit());
     this.physics.add.overlap(this.projectiles, this.enemies, (proj, obj) =>
@@ -116,14 +167,11 @@ class PrototypeScene extends Phaser.Scene {
       .rectangle(12, 56, 0, 5, 0xffd23f)
       .setOrigin(0, 0.5)
       .setDepth(11);
-    for (let i = 0; i < GAUGE_MAX; i++) {
-      this.gaugePips.push(
-        this.add
-          .rectangle(12 + i * 26, HEIGHT - 18, 22, 8, 0x4fc3f7)
-          .setOrigin(0, 0.5)
-          .setDepth(11),
-      );
-    }
+    this.xpBar = this.add
+      .rectangle(12, 66, 0, 5, 0x5be07a)
+      .setOrigin(0, 0.5)
+      .setDepth(11);
+    this.buildGaugePips();
     this.add
       .text(
         WIDTH / 2,
@@ -163,7 +211,7 @@ class PrototypeScene extends Phaser.Scene {
   }
 
   private togglePause() {
-    if (this.dead) return;
+    if (this.dead || this.choosing) return;
     this.paused = !this.paused;
     this.pauseOverlay.setVisible(this.paused);
     if (this.paused) {
@@ -175,8 +223,21 @@ class PrototypeScene extends Phaser.Scene {
     }
   }
 
+  private buildGaugePips() {
+    this.gaugePips.forEach((p) => p.destroy());
+    this.gaugePips = [];
+    for (let i = 0; i < this.gaugeMax; i++) {
+      this.gaugePips.push(
+        this.add
+          .rectangle(12 + i * 26, HEIGHT - 18, 22, 8, 0x4fc3f7)
+          .setOrigin(0, 0.5)
+          .setDepth(11),
+      );
+    }
+  }
+
   update(_time: number, deltaMs: number) {
-    if (this.dead || this.paused) return;
+    if (this.dead || this.paused || this.choosing) return;
     const now = this.time.now;
 
     const dir = new Phaser.Math.Vector2(
@@ -206,10 +267,35 @@ class PrototypeScene extends Phaser.Scene {
     this.time.timeScale = this.worldSpeed;
 
     // 플레이어는 실시간 속도 유지: 물리 감속을 역보정해서 슬로우모 속 우위를 만든다.
-    const speed = (dashing ? PLAYER_SPEED * 3.2 : PLAYER_SPEED) / this.worldSpeed;
+    const speed = (dashing ? this.moveSpeed * 3.2 : this.moveSpeed) / this.worldSpeed;
     const move = dashing && dir.lengthSq() === 0 ? this.lastDir : dir;
     this.player.setVelocity(move.x * speed, move.y * speed);
     this.player.setAlpha(now < this.invincibleUntil ? 0.4 : 1);
+
+    // 자동공격은 게임 시간으로 진행 — 불릿타임 중엔 발사도 느려진다.
+    this.fireCooldown -= deltaMs * this.worldSpeed;
+    while (this.fireCooldown <= 0) {
+      this.fire();
+      this.fireCooldown += this.fireInterval;
+    }
+
+    // XP 보석: 자석 반경 안이면 끌려오고, 닿으면 수집.
+    const px = this.player.x;
+    const py = this.player.y;
+    this.gems = this.gems.filter((gem) => {
+      const d = Phaser.Math.Distance.Between(px, py, gem.x, gem.y);
+      if (d < COLLECT_RADIUS) {
+        gem.destroy();
+        this.gainXp(1);
+        return false;
+      }
+      if (d < this.magnetRadius) {
+        const step = (GEM_PULL_SPEED * deltaMs) / 1000;
+        gem.x += ((px - gem.x) / d) * step;
+        gem.y += ((py - gem.y) / d) * step;
+      }
+      return true;
+    });
 
     // 콤보는 실시간으로 식는다 — 불릿타임으로도 보존 불가.
     if (this.combo > 0) {
@@ -218,8 +304,8 @@ class PrototypeScene extends Phaser.Scene {
     }
     // 충전은 완전히 멈춰 서 있을 때만 — 세상이 정상 속도로 다가오는 동안의 투자다.
     const standing = dir.lengthSq() === 0 && !dashing && !bulletActive;
-    if (standing && this.gauge < GAUGE_MAX) {
-      this.gauge = Math.min(GAUGE_MAX, this.gauge + deltaMs / GAUGE_CHARGE_MS);
+    if (standing && this.gauge < this.gaugeMax) {
+      this.gauge = Math.min(this.gaugeMax, this.gauge + deltaMs / GAUGE_CHARGE_MS);
     }
 
     const speedMul = Math.min(1.6, 1 + this.elapsedSec() * SPEED_GROWTH);
@@ -240,9 +326,10 @@ class PrototypeScene extends Phaser.Scene {
     const t = Math.floor(this.elapsedSec());
     const clock = `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
     this.hud.setText(
-      `${clock}   점수 ${this.score}` +
+      `${clock}   Lv${this.level}   점수 ${this.score}` +
         (this.combo > 0 ? `   콤보 x${(1 + this.combo * 0.1).toFixed(1)}` : ''),
     );
+    this.xpBar.width = 150 * Phaser.Math.Clamp(this.xp / this.xpNeed(), 0, 1);
     this.comboBar.width = this.combo > 0 ? 120 * (this.comboTimeLeft / COMBO_WINDOW_MS) : 0;
     this.gaugePips.forEach((pip, i) => {
       const fill = Phaser.Math.Clamp(this.gauge - i, 0, 1);
@@ -265,24 +352,121 @@ class PrototypeScene extends Phaser.Scene {
     });
     if (!nearest) return;
     const target = nearest as Enemy;
-    const p = this.physics.add.image(this.player.x, this.player.y, 'projectile');
-    this.projectiles.add(p);
-    const aim = new Phaser.Math.Vector2(target.x - this.player.x, target.y - this.player.y)
-      .normalize()
-      .scale(PROJECTILE_SPEED);
-    p.setVelocity(aim.x, aim.y);
-    p.setRotation(aim.angle());
+    const baseAngle = Phaser.Math.Angle.Between(this.player.x, this.player.y, target.x, target.y);
+    // 갈래: 투사체를 8도 간격 부채꼴로.
+    const spread = Phaser.Math.DegToRad(8);
+    for (let i = 0; i < this.projectileCount; i++) {
+      const angle = baseAngle + spread * (i - (this.projectileCount - 1) / 2);
+      const p = this.physics.add.image(this.player.x, this.player.y, 'projectile');
+      this.projectiles.add(p);
+      p.setVelocity(Math.cos(angle) * PROJECTILE_SPEED, Math.sin(angle) * PROJECTILE_SPEED);
+      p.setRotation(angle);
+    }
   }
 
   private onProjectileHit(proj: Phaser.GameObjects.GameObject, enemy: Enemy) {
     proj.destroy();
-    enemy.hp = (enemy.hp ?? 1) - 1;
+    enemy.hp = (enemy.hp ?? 1) - this.damage;
     if (enemy.hp > 0) return;
     const gain = enemy.elite ? 50 : 10;
     this.combo += 1;
     this.comboTimeLeft = COMBO_WINDOW_MS;
     this.score += Math.round(gain * (1 + this.combo * 0.1));
+    this.dropGems(enemy.x, enemy.y, enemy.elite ? 3 : 1);
     enemy.destroy();
+  }
+
+  private dropGems(x: number, y: number, count: number) {
+    for (let i = 0; i < count; i++) {
+      if (this.gems.length >= MAX_GEMS) this.gems.shift()?.destroy();
+      const gem = this.add.image(
+        x + Phaser.Math.Between(-10, 10),
+        y + Phaser.Math.Between(-10, 10),
+        'gem',
+      );
+      this.gems.push(gem);
+    }
+  }
+
+  private xpNeed(): number {
+    return 5 + (this.level - 1) * 3;
+  }
+
+  private gainXp(amount: number) {
+    this.xp += amount;
+    if (this.xp >= this.xpNeed() && !this.choosing) this.openLevelUp();
+  }
+
+  private openLevelUp() {
+    this.xp -= this.xpNeed();
+    this.level += 1;
+    this.choosing = true;
+    this.physics.pause();
+    this.time.paused = true;
+    this.player.setVelocity(0, 0);
+
+    const pool = UPGRADE_DEFS.filter((u) => (this.stacks[u.key] ?? 0) < (u.max ?? 99));
+    const picks = Phaser.Utils.Array.Shuffle([...pool]).slice(0, 3);
+
+    const parts: Phaser.GameObjects.GameObject[] = [
+      this.add.rectangle(0, 0, WIDTH, HEIGHT, 0x05060a, 0.75).setOrigin(0),
+      this.add
+        .text(WIDTH / 2, HEIGHT / 2 - 120, `레벨 ${this.level}!  업그레이드 선택`, {
+          fontSize: '26px',
+          color: '#e8e8f0',
+        })
+        .setOrigin(0.5),
+    ];
+    picks.forEach((def, i) => {
+      const x = WIDTH / 2 + (i - (picks.length - 1) / 2) * 220;
+      const card = this.add
+        .rectangle(x, HEIGHT / 2, 190, 130, 0x1e2230)
+        .setStrokeStyle(2, 0x4fc3f7)
+        .setInteractive({ useHandCursor: true });
+      card.on('pointerdown', () => this.chooseUpgrade(def));
+      parts.push(
+        card,
+        this.add
+          .text(x, HEIGHT / 2 - 30, `${i + 1}. ${def.name}`, {
+            fontSize: '22px',
+            color: '#ffd23f',
+          })
+          .setOrigin(0.5),
+        this.add
+          .text(x, HEIGHT / 2 + 10, def.desc, { fontSize: '15px', color: '#c9cede' })
+          .setOrigin(0.5),
+        this.add
+          .text(x, HEIGHT / 2 + 42, `보유 ${this.stacks[def.key] ?? 0}`, {
+            fontSize: '13px',
+            color: '#9aa0b0',
+          })
+          .setOrigin(0.5),
+      );
+    });
+    this.levelUpUI = this.add.container(0, 0, parts).setDepth(40);
+
+    const keys = [
+      Phaser.Input.Keyboard.KeyCodes.ONE,
+      Phaser.Input.Keyboard.KeyCodes.TWO,
+      Phaser.Input.Keyboard.KeyCodes.THREE,
+    ];
+    picks.forEach((def, i) => {
+      this.input.keyboard!.addKey(keys[i]).once('down', () => this.chooseUpgrade(def));
+    });
+  }
+
+  private chooseUpgrade(def: UpgradeDef) {
+    if (!this.choosing) return;
+    this.stacks[def.key] = (this.stacks[def.key] ?? 0) + 1;
+    def.apply(this);
+    if (def.key === 'gauge') this.buildGaugePips();
+    this.levelUpUI?.destroy();
+    this.levelUpUI = undefined;
+    this.choosing = false;
+    this.physics.resume();
+    this.time.paused = false;
+    // 넘친 XP로 연속 레벨업 가능.
+    if (this.xp >= this.xpNeed()) this.openLevelUp();
   }
 
   private tryMerge(a: Enemy, b: Enemy) {
