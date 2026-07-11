@@ -60,6 +60,83 @@ type Enemy = Phaser.Types.Physics.Arcade.ImageWithDynamicBody & {
   chargeDir?: Phaser.Math.Vector2;
 };
 
+// 보스: 5분 도달 시 등장, 처치하면 클리어.
+const BOSS_AT_SEC = 300;
+const BOSS_HP = 90;
+const BOSS_SPEED = 40;
+const BOSS_VOLLEY_MS = 3500;
+const BOSS_BULLET_SPEED = 150;
+
+// 에셋 없는 WebAudio 신스 — CC0 사운드팩 도입 전 임시. 라이선스 이슈 제로.
+class Synth {
+  private ctx?: AudioContext;
+  private master?: GainNode;
+  private filter?: BiquadFilterNode;
+  private lastShot = 0;
+
+  ensure() {
+    if (!this.ctx) {
+      this.ctx = new AudioContext();
+      this.filter = this.ctx.createBiquadFilter();
+      this.filter.type = 'lowpass';
+      this.filter.frequency.value = 18000;
+      this.master = this.ctx.createGain();
+      this.master.gain.value = 0.5;
+      this.master.connect(this.filter);
+      this.filter.connect(this.ctx.destination);
+    }
+    if (this.ctx.state === 'suspended') void this.ctx.resume();
+  }
+
+  // 불릿타임 오디오: 세상이 느려지면 소리도 먹먹해진다.
+  setWorldSpeed(ws: number) {
+    if (this.filter) this.filter.frequency.value = 400 + 17000 * ws * ws;
+  }
+
+  private beep(type: OscillatorType, f0: number, f1: number, dur: number, vol: number) {
+    if (!this.ctx || !this.master) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(f0, t);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(f1, 1), t + dur);
+    gain.gain.setValueAtTime(vol, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    osc.connect(gain).connect(this.master);
+    osc.start(t);
+    osc.stop(t + dur);
+  }
+
+  shoot() {
+    const now = performance.now();
+    if (now - this.lastShot < 90) return; // 연사 시 소리 도배 방지
+    this.lastShot = now;
+    this.beep('square', 880, 220, 0.07, 0.05);
+  }
+  kill() {
+    this.beep('square', 330, 110, 0.12, 0.1);
+  }
+  bigKill() {
+    this.beep('sawtooth', 220, 55, 0.3, 0.18);
+  }
+  dash() {
+    this.beep('sine', 200, 900, 0.15, 0.14);
+  }
+  pickup(combo: number) {
+    this.beep('triangle', 600 + Math.min(combo, 20) * 40, 900 + Math.min(combo, 20) * 40, 0.06, 0.08);
+  }
+  levelup() {
+    this.beep('triangle', 440, 880, 0.25, 0.15);
+  }
+  death() {
+    this.beep('sawtooth', 400, 40, 0.6, 0.22);
+  }
+  victory() {
+    this.beep('triangle', 523, 1046, 0.5, 0.2);
+  }
+}
+
 type UpgradeDef = {
   key: string;
   name: string;
@@ -163,6 +240,14 @@ class PrototypeScene extends Phaser.Scene {
   private xpBar!: Phaser.GameObjects.Rectangle;
   private levelUpUI?: Phaser.GameObjects.Container;
   private levelKeys: Phaser.Input.Keyboard.Key[] = [];
+  private synth = new Synth();
+  private sparks!: Phaser.GameObjects.Particles.ParticleEmitter;
+  private hitstopMs = 0;
+  private boss?: Enemy;
+  private bossSpawned = false;
+  private bossBullets!: Phaser.Physics.Arcade.Group;
+  private bossNextVolley = 0;
+  private bossBar?: Phaser.GameObjects.Rectangle;
 
   create() {
     this.dead = false;
@@ -197,6 +282,9 @@ class PrototypeScene extends Phaser.Scene {
     g.clear().fillStyle(0x7a3b2e).fillCircle(11, 11, 11).generateTexture('tank', 22, 22);
     g.clear().fillStyle(0x9b59b6).fillRect(0, 0, 16, 16).generateTexture('charger', 16, 16);
     g.clear().fillStyle(0x8c2318).fillCircle(14, 14, 14).generateTexture('elite', 28, 28);
+    g.clear().fillStyle(0x5a1210).fillCircle(24, 24, 24).generateTexture('boss', 48, 48);
+    g.clear().fillStyle(0xc44fea).fillCircle(5, 5, 5).generateTexture('bossBullet', 10, 10);
+    g.clear().fillStyle(0xfff2c0).fillRect(0, 0, 4, 4).generateTexture('spark', 4, 4);
     g.clear().fillStyle(0xffd23f).fillRect(0, 0, 8, 4).generateTexture('projectile', 8, 4);
     g.clear().fillStyle(0x5be07a).fillRect(2, 0, 4, 8).fillRect(0, 2, 8, 4).generateTexture('gem', 8, 8);
     g.destroy();
@@ -206,6 +294,24 @@ class PrototypeScene extends Phaser.Scene {
 
     this.enemies = this.physics.add.group();
     this.projectiles = this.physics.add.group();
+    this.bossBullets = this.physics.add.group();
+    this.boss = undefined;
+    this.bossSpawned = false;
+    this.hitstopMs = 0;
+
+    this.sparks = this.add.particles(0, 0, 'spark', {
+      speed: { min: 60, max: 180 },
+      lifespan: 300,
+      scale: { start: 1, end: 0 },
+      emitting: false,
+    });
+    this.sparks.setDepth(5);
+
+    // 브라우저 오디오 정책: 첫 입력에서 컨텍스트 활성화.
+    this.input.keyboard!.once('keydown', () => this.synth.ensure());
+    this.input.once('pointerdown', () => this.synth.ensure());
+
+    this.physics.add.overlap(this.player, this.bossBullets, () => this.onPlayerHit());
 
     this.runStart = this.time.now;
     this.lastExtraSpawn = this.runStart;
@@ -344,6 +450,15 @@ class PrototypeScene extends Phaser.Scene {
 
   update(_time: number, deltaMs: number) {
     if (this.dead || this.paused || this.choosing) return;
+
+    // 히트스톱: 묵직한 킬의 실시간 정지 — 짧아서 콤보 타이머 정지는 무시 가능.
+    if (this.hitstopMs > 0) {
+      this.hitstopMs -= deltaMs;
+      this.physics.world.timeScale = 50;
+      this.time.timeScale = 0.02;
+      this.player.setVelocity(0, 0);
+      return;
+    }
     const now = this.time.now;
 
     const dir = new Phaser.Math.Vector2(
@@ -360,6 +475,7 @@ class PrototypeScene extends Phaser.Scene {
       this.dashUntil = now + DASH_DURATION_MS;
       this.invincibleUntil = now + DASH_IFRAME_MS;
       this.cameras.main.shake(90, 0.004);
+      this.synth.dash();
     }
     // 대시 잔상 — "발동했다"를 몸으로 보여준다.
     if (dashing) {
@@ -402,6 +518,7 @@ class PrototypeScene extends Phaser.Scene {
       if (d < COLLECT_RADIUS) {
         gem.destroy();
         this.gainXp(1);
+        this.synth.pickup(this.combo);
         return false;
       }
       if (d < this.magnetRadius) {
@@ -492,6 +609,33 @@ class PrototypeScene extends Phaser.Scene {
     this.cameras.main.setZoom(1 + (1 - this.worldSpeed) * 0.06);
     if (bulletActive) this.player.setTint(0x7fd8ff);
     else this.player.clearTint();
+    this.synth.setWorldSpeed(this.worldSpeed);
+
+    // 보스: 5분 도달 시 1회 등장. 느린 추적 + 주기적 방사 탄막.
+    if (!this.bossSpawned && this.elapsedSec() >= BOSS_AT_SEC) this.spawnBoss();
+    if (this.boss?.active) {
+      const b = this.boss;
+      const aim = new Phaser.Math.Vector2(this.player.x - b.x, this.player.y - b.y)
+        .normalize()
+        .scale(BOSS_SPEED);
+      b.setVelocity(aim.x, aim.y);
+      if (now >= this.bossNextVolley) {
+        this.bossNextVolley = now + BOSS_VOLLEY_MS;
+        for (let i = 0; i < 10; i++) {
+          const angle = (Math.PI * 2 * i) / 10;
+          const bullet = this.physics.add.image(b.x, b.y, 'bossBullet');
+          this.bossBullets.add(bullet);
+          bullet.setVelocity(Math.cos(angle) * BOSS_BULLET_SPEED, Math.sin(angle) * BOSS_BULLET_SPEED);
+        }
+      }
+      this.bossBar?.setPosition(b.x - 30, b.y - 36);
+      this.bossBar?.setSize(60 * Math.max(0, (b.hp ?? 0) / BOSS_HP), 5);
+    }
+    this.bossBullets.getChildren().forEach((obj) => {
+      const bullet = obj as Phaser.Types.Physics.Arcade.ImageWithDynamicBody;
+      if (bullet.x < -30 || bullet.x > WIDTH + 30 || bullet.y < -30 || bullet.y > HEIGHT + 30)
+        bullet.destroy();
+    });
     const t = Math.floor(this.elapsedSec());
     const clock = `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
     this.hud.setText(
@@ -531,6 +675,7 @@ class PrototypeScene extends Phaser.Scene {
       p.setVelocity(Math.cos(angle) * PROJECTILE_SPEED, Math.sin(angle) * PROJECTILE_SPEED);
       p.setRotation(angle);
     }
+    this.synth.shoot();
   }
 
   private onProjectileHit(proj: Phaser.GameObjects.GameObject, enemy: Enemy) {
@@ -543,6 +688,17 @@ class PrototypeScene extends Phaser.Scene {
     this.comboTimeLeft = COMBO_WINDOW_MS;
     this.score += Math.round(gain * (1 + this.combo * 0.1));
     this.dropGems(enemy.x, enemy.y, enemy.elite ? 3 : stats.gems);
+
+    // 킬 juice: 파편은 전 킬, 히트스톱·셰이크·중타격음은 묵직한 킬만.
+    const heavy = enemy.elite || enemy.kind === 'tank' || enemy.kind === 'charger';
+    this.sparks.explode(heavy ? 16 : 8, enemy.x, enemy.y);
+    if (heavy) {
+      this.hitstopMs = 40;
+      this.cameras.main.shake(60, 0.003);
+      this.synth.bigKill();
+    } else {
+      this.synth.kill();
+    }
     enemy.destroy();
   }
 
@@ -571,6 +727,7 @@ class PrototypeScene extends Phaser.Scene {
     this.xp -= this.xpNeed();
     this.level += 1;
     this.choosing = true;
+    this.synth.levelup();
     this.physics.pause();
     this.time.paused = true;
     this.player.setVelocity(0, 0);
@@ -683,23 +840,79 @@ class PrototypeScene extends Phaser.Scene {
 
   private onPlayerHit() {
     if (this.dead || this.time.now < this.invincibleUntil) return;
+    this.synth.death();
+    this.cameras.main.shake(250, 0.01);
+    this.sparks.explode(24, this.player.x, this.player.y);
+    this.endRun(false);
+  }
+
+  private spawnBoss() {
+    this.bossSpawned = true;
+    const boss = this.physics.add.image(WIDTH / 2, -60, 'boss') as Enemy;
+    boss.hp = BOSS_HP;
+    this.boss = boss;
+    this.bossNextVolley = this.time.now + 1500;
+    this.bossBar = this.add.rectangle(0, 0, 60, 5, 0xe4573d).setOrigin(0, 0.5).setDepth(12);
+    // Phaser는 group vs sprite 콜백 인자 순서가 뒤집힐 수 있어 boss가 아닌 쪽을 투사체로 판별.
+    this.physics.add.overlap(this.projectiles, boss, (a, b) => {
+      const proj = (a as Phaser.GameObjects.GameObject) === boss ? b : a;
+      this.onBossHit(proj as Phaser.GameObjects.GameObject);
+    });
+    this.physics.add.overlap(this.player, boss, () => this.onPlayerHit());
+    const warn = this.add
+      .text(WIDTH / 2, 120, '보스 접근!', { fontSize: '32px', color: '#e4573d' })
+      .setOrigin(0.5)
+      .setDepth(25);
+    this.tweens.add({ targets: warn, alpha: 0, delay: 1600, duration: 500, onComplete: () => warn.destroy() });
+    this.cameras.main.shake(300, 0.005);
+  }
+
+  private onBossHit(proj: Phaser.GameObjects.GameObject) {
+    const boss = this.boss;
+    if (!boss?.active) return;
+    proj.destroy();
+    boss.hp = (boss.hp ?? 1) - this.damage;
+    this.sparks.explode(4, boss.x, boss.y);
+    if (boss.hp > 0) return;
+    this.combo += 1;
+    this.comboTimeLeft = COMBO_WINDOW_MS;
+    this.score += Math.round(300 * (1 + this.combo * 0.1));
+    this.sparks.explode(40, boss.x, boss.y);
+    this.hitstopMs = 250;
+    this.cameras.main.shake(400, 0.012);
+    this.synth.victory();
+    boss.destroy();
+    this.bossBar?.destroy();
+    this.endRun(true);
+  }
+
+  private endRun(won: boolean) {
     this.dead = true;
     this.physics.pause();
     const high = Math.max(this.score, this.highScore());
     localStorage.setItem('highScore', String(high));
+    const t = Math.floor(this.elapsedSec());
+    const clock = `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
     this.add
       .rectangle(0, 0, WIDTH, HEIGHT, 0x05060a, 0.7)
       .setOrigin(0)
       .setDepth(20);
     this.add
-      .text(WIDTH / 2, HEIGHT / 2 - 20, `점수 ${this.score}   최고 ${high}`, {
-        fontSize: '28px',
+      .text(WIDTH / 2, HEIGHT / 2 - 52, won ? '클리어!' : '사망', {
+        fontSize: '36px',
+        color: won ? '#5be07a' : '#e4573d',
+      })
+      .setOrigin(0.5)
+      .setDepth(21);
+    this.add
+      .text(WIDTH / 2, HEIGHT / 2, `점수 ${this.score}   최고 ${high}   생존 ${clock}`, {
+        fontSize: '26px',
         color: '#e8e8f0',
       })
       .setOrigin(0.5)
       .setDepth(21);
     this.add
-      .text(WIDTH / 2, HEIGHT / 2 + 24, 'R 또는 스페이스 — 즉시 재시작', {
+      .text(WIDTH / 2, HEIGHT / 2 + 44, 'R 또는 스페이스 — 즉시 재시작', {
         fontSize: '18px',
         color: '#ffd23f',
       })
