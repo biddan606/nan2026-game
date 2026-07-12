@@ -3,7 +3,6 @@ import Phaser from 'phaser';
 const WIDTH = 960;
 const HEIGHT = 540;
 const PLAYER_SPEED = 220;
-const ELITE_SPEED = 75;
 const PROJECTILE_SPEED = 380;
 // 예측자: 플레이어 실속도 × 리드 시간 지점을 조준 — 경로 탐색 없이 "앞을 막는" 체감.
 const INTERCEPT_LEAD_SEC = 0.6;
@@ -28,8 +27,6 @@ const GAUGE_MAX = 3;
 const GAUGE_CHARGE_MS = 1200;
 const DASH_DURATION_MS = 160;
 const DASH_IFRAME_MS = 350;
-const MERGE_MIN_AGE_MS = 2500;
-const MAX_ELITES = 4;
 // 난이도 디렉터 (ADR 참고: VS 쿼터 + sqrt 곡선 + L4D 피크·밸리)
 const DIRECTOR_TICK_MS = 250;
 const BASE_MIN_DENSITY = 12;
@@ -52,8 +49,6 @@ const KIND_STATS: Record<
 
 type Enemy = Phaser.Types.Physics.Arcade.ImageWithDynamicBody & {
   hp?: number;
-  elite?: boolean;
-  bornAt?: number;
   kind?: EnemyKind;
   mode?: 'seek' | 'windup' | 'charge';
   modeUntil?: number;
@@ -281,7 +276,6 @@ class PrototypeScene extends Phaser.Scene {
     g.clear().fillStyle(0xf5a623).fillTriangle(8, 0, 16, 16, 0, 16).generateTexture('inter', 16, 16);
     g.clear().fillStyle(0x7a3b2e).fillCircle(11, 11, 11).generateTexture('tank', 22, 22);
     g.clear().fillStyle(0x9b59b6).fillRect(0, 0, 16, 16).generateTexture('charger', 16, 16);
-    g.clear().fillStyle(0x8c2318).fillCircle(14, 14, 14).generateTexture('elite', 28, 28);
     g.clear().fillStyle(0x5a1210).fillCircle(24, 24, 24).generateTexture('boss', 48, 48);
     g.clear().fillStyle(0xc44fea).fillCircle(5, 5, 5).generateTexture('bossBullet', 10, 10);
     g.clear().fillStyle(0xfff2c0).fillRect(0, 0, 4, 4).generateTexture('spark', 4, 4);
@@ -323,10 +317,8 @@ class PrototypeScene extends Phaser.Scene {
     this.physics.add.overlap(this.projectiles, this.enemies, (proj, obj) =>
       this.onProjectileHit(proj as Phaser.GameObjects.GameObject, obj as Enemy),
     );
-    // 적끼리 겹치면 합체 — 카이팅으로 뭉치게 몰면 엘리트가 태어난다.
-    this.physics.add.overlap(this.enemies, this.enemies, (a, b) =>
-      this.tryMerge(a as Enemy, b as Enemy),
-    );
+    // 적끼리 서로 밀어냄 — 포개져서 5마리가 1마리로 보이는 가짜 난이도 방지.
+    this.physics.add.collider(this.enemies, this.enemies);
 
     this.dim = this.add
       .rectangle(0, 0, WIDTH, HEIGHT, 0x05060a)
@@ -550,10 +542,6 @@ class PrototypeScene extends Phaser.Scene {
         const aim = new Phaser.Math.Vector2(tx - enemy.x, ty - enemy.y).normalize().scale(spd);
         enemy.setVelocity(aim.x, aim.y);
       };
-      if (enemy.elite) {
-        seek(this.player.x, this.player.y, ELITE_SPEED * speedMul);
-        return;
-      }
       const stats = KIND_STATS[enemy.kind ?? 'chaser'];
       const spd = stats.speed * speedMul;
       switch (enemy.kind) {
@@ -683,14 +671,13 @@ class PrototypeScene extends Phaser.Scene {
     enemy.hp = (enemy.hp ?? 1) - this.damage;
     if (enemy.hp > 0) return;
     const stats = KIND_STATS[enemy.kind ?? 'chaser'];
-    const gain = enemy.elite ? 50 : stats.score;
     this.combo += 1;
     this.comboTimeLeft = COMBO_WINDOW_MS;
-    this.score += Math.round(gain * (1 + this.combo * 0.1));
-    this.dropGems(enemy.x, enemy.y, enemy.elite ? 3 : stats.gems);
+    this.score += Math.round(stats.score * (1 + this.combo * 0.1));
+    this.dropGems(enemy.x, enemy.y, stats.gems);
 
     // 킬 juice: 파편은 전 킬, 히트스톱·셰이크·중타격음은 묵직한 킬만.
-    const heavy = enemy.elite || enemy.kind === 'tank' || enemy.kind === 'charger';
+    const heavy = enemy.kind === 'tank' || enemy.kind === 'charger';
     this.sparks.explode(heavy ? 16 : 8, enemy.x, enemy.y);
     if (heavy) {
       this.hitstopMs = 40;
@@ -819,23 +806,6 @@ class PrototypeScene extends Phaser.Scene {
     this.time.paused = false;
     // 넘친 XP로 연속 레벨업 가능.
     if (this.xp >= this.xpNeed()) this.openLevelUp();
-  }
-
-  private tryMerge(a: Enemy, b: Enemy) {
-    if (a === b || !a.active || !b.active || a.elite || b.elite) return;
-    const now = this.time.now;
-    if (now - (a.bornAt ?? 0) < MERGE_MIN_AGE_MS || now - (b.bornAt ?? 0) < MERGE_MIN_AGE_MS) return;
-    const elites = this.enemies.getChildren().filter((e) => (e as Enemy).elite).length;
-    if (elites >= MAX_ELITES) return;
-    const x = (a.x + b.x) / 2;
-    const y = (a.y + b.y) / 2;
-    a.destroy();
-    b.destroy();
-    const elite = this.physics.add.image(x, y, 'elite') as Enemy;
-    elite.hp = 4;
-    elite.elite = true;
-    elite.bornAt = now;
-    this.enemies.add(elite);
   }
 
   private onPlayerHit() {
@@ -991,7 +961,6 @@ class PrototypeScene extends Phaser.Scene {
     enemy.kind = kind;
     enemy.hp = stats.hp;
     enemy.mode = 'seek';
-    enemy.bornAt = this.time.now;
     this.enemies.add(enemy);
   }
 
