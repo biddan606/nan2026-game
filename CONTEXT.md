@@ -1,6 +1,6 @@
-# NAN 2026 해커톤 출품작
+# STILL ALIVE (멈춰야 산다)
 
-NAN 2026 (NHN Game × AI Hackathon) 사전 과제로 제출할 게임. 심사자가 링크 클릭 한 번으로 브라우저에서 플레이할 수 있어야 한다.
+NAN 2026 (NHN Game × AI Hackathon) 사전 과제로 제출하는 서바이벌 액션. 심사자가 링크 클릭 한 번으로 브라우저에서 플레이할 수 있어야 한다.
 
 ## Language
 
