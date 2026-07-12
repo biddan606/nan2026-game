@@ -37,12 +37,25 @@ const SPEED_GROWTH = 0.002; // 초당 적 속도 증가율 (선형, 상한 1.6�
 
 type EnemyKind = 'chaser' | 'inter' | 'tank' | 'charger' | 'slime';
 
+// Tiny Swords (구버전 CC0) 스프라이트 — 192px 그리드, 0행 idle / 1행 run.
+const SHEETS: Record<string, { file: string; cols: number }> = {
+  warriorBlue: { file: 'Warrior_Blue.png', cols: 6 },
+  warriorRed: { file: 'Warrior_Red.png', cols: 6 },
+  torchRed: { file: 'Torch_Red.png', cols: 7 },
+  torchYellow: { file: 'Torch_Yellow.png', cols: 7 },
+  torchPurple: { file: 'Torch_Purple.png', cols: 7 },
+  barrelRed: { file: 'Barrel_Red.png', cols: 4 },
+  tntBlue: { file: 'TNT_Blue.png', cols: 7 },
+  tntRed: { file: 'TNT_Red.png', cols: 7 },
+  tntYellow: { file: 'TNT_Yellow.png', cols: 7 },
+};
+
 // 슬라임: 같은 단계끼리 서로를 찾아가 합체. 소(1)→중(2합체)→대(4합체 상당).
 // 대형은 원거리 탄막 — 합체 방치의 대가가 탄막 유닛이다.
 const SLIME_STAGES = [
-  { tex: 'slime1', hp: 1, speed: 85, score: 12, gems: 1 },
-  { tex: 'slime2', hp: 3, speed: 115, score: 25, gems: 2 },
-  { tex: 'slime3', hp: 8, speed: 50, score: 60, gems: 4 },
+  { tex: 'tntBlue', hp: 1, speed: 85, score: 12, gems: 1, scale: 0.3, body: 55 },
+  { tex: 'tntRed', hp: 3, speed: 115, score: 25, gems: 2, scale: 0.42, body: 60 },
+  { tex: 'tntYellow', hp: 8, speed: 50, score: 60, gems: 4, scale: 0.58, body: 70 },
 ];
 const SLIME_SEEK_RADIUS = 150;
 const SLIME_MERGE_DIST = [22, 30];
@@ -52,16 +65,16 @@ const SLIME_BULLET_SPEED = 140;
 
 const KIND_STATS: Record<
   EnemyKind,
-  { tex: string; hp: number; speed: number; score: number; gems: number }
+  { tex: string; hp: number; speed: number; score: number; gems: number; scale: number; body: number }
 > = {
-  chaser: { tex: 'enemy', hp: 1, speed: 95, score: 10, gems: 1 },
-  inter: { tex: 'inter', hp: 1, speed: 105, score: 15, gems: 1 },
-  tank: { tex: 'tank', hp: 3, speed: 55, score: 20, gems: 2 },
-  charger: { tex: 'charger', hp: 2, speed: 80, score: 20, gems: 2 },
-  slime: { tex: 'slime1', hp: 1, speed: 85, score: 12, gems: 1 },
+  chaser: { tex: 'torchRed', hp: 1, speed: 95, score: 10, gems: 1, scale: 0.38, body: 55 },
+  inter: { tex: 'torchYellow', hp: 1, speed: 105, score: 15, gems: 1, scale: 0.38, body: 55 },
+  tank: { tex: 'barrelRed', hp: 3, speed: 55, score: 20, gems: 2, scale: 0.44, body: 65 },
+  charger: { tex: 'torchPurple', hp: 2, speed: 80, score: 20, gems: 2, scale: 0.4, body: 55 },
+  slime: { tex: 'tntBlue', hp: 1, speed: 85, score: 12, gems: 1, scale: 0.3, body: 55 },
 };
 
-type Enemy = Phaser.Types.Physics.Arcade.ImageWithDynamicBody & {
+type Enemy = Phaser.Types.Physics.Arcade.SpriteWithDynamicBody & {
   hp?: number;
   kind?: EnemyKind;
   mode?: 'seek' | 'windup' | 'charge';
@@ -209,7 +222,7 @@ const UPGRADE_DEFS: UpgradeDef[] = [
 ];
 
 class PrototypeScene extends Phaser.Scene {
-  private player!: Phaser.Types.Physics.Arcade.ImageWithDynamicBody;
+  private player!: Phaser.Types.Physics.Arcade.SpriteWithDynamicBody;
   private enemies!: Phaser.Physics.Arcade.Group;
   private projectiles!: Phaser.Physics.Arcade.Group;
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
@@ -290,23 +303,18 @@ class PrototypeScene extends Phaser.Scene {
     this.gaugePips = [];
 
     const g = this.add.graphics();
-    g.fillStyle(0xf2f2f2).fillRect(0, 0, 16, 16).generateTexture('player', 16, 16);
-    g.clear().fillStyle(0xe4573d).fillCircle(8, 8, 8).generateTexture('enemy', 16, 16);
-    g.clear().fillStyle(0xf5a623).fillTriangle(8, 0, 16, 16, 0, 16).generateTexture('inter', 16, 16);
-    g.clear().fillStyle(0x7a3b2e).fillCircle(11, 11, 11).generateTexture('tank', 22, 22);
-    g.clear().fillStyle(0x9b59b6).fillRect(0, 0, 16, 16).generateTexture('charger', 16, 16);
-    g.clear().fillStyle(0x3dd6c3).fillCircle(7, 7, 7).generateTexture('slime1', 14, 14);
-    g.clear().fillStyle(0x2bb5a4).fillCircle(11, 11, 11).generateTexture('slime2', 22, 22);
-    g.clear().fillStyle(0x1e8f82).fillCircle(16, 16, 16).generateTexture('slime3', 32, 32);
-    g.clear().fillStyle(0x7fe8d9).fillCircle(5, 5, 5).generateTexture('slimeBullet', 10, 10);
-    g.clear().fillStyle(0x5a1210).fillCircle(24, 24, 24).generateTexture('boss', 48, 48);
     g.clear().fillStyle(0xc44fea).fillCircle(5, 5, 5).generateTexture('bossBullet', 10, 10);
     g.clear().fillStyle(0xfff2c0).fillRect(0, 0, 4, 4).generateTexture('spark', 4, 4);
-    g.clear().fillStyle(0xffd23f).fillRect(0, 0, 8, 4).generateTexture('projectile', 8, 4);
     g.clear().fillStyle(0x5be07a).fillRect(2, 0, 4, 8).fillRect(0, 2, 8, 4).generateTexture('gem', 8, 8);
     g.destroy();
 
-    this.player = this.physics.add.image(WIDTH / 2, HEIGHT / 2, 'player');
+    this.buildAnims();
+
+    this.player = this.physics.add.sprite(WIDTH / 2, HEIGHT / 2, 'warriorBlue');
+    this.player.setScale(0.42);
+    this.player.body.setSize(46, 52);
+    this.player.play('warriorBlue-idle');
+    this.player.setDepth(2);
     this.player.setCollideWorldBounds(true);
 
     this.enemies = this.physics.add.group();
@@ -442,6 +450,47 @@ class PrototypeScene extends Phaser.Scene {
 
   private gaugeLabel?: Phaser.GameObjects.Text;
 
+  preload() {
+    this.load.setPath('assets/tiny-swords/');
+    Object.entries(SHEETS).forEach(([key, s]) =>
+      this.load.spritesheet(key, s.file, { frameWidth: 192, frameHeight: 192 }),
+    );
+    this.load.image('arrow', 'Arrow.png');
+    this.load.spritesheet('dynamite', 'Dynamite.png', { frameWidth: 64, frameHeight: 64 });
+    this.load.setPath('');
+  }
+
+  // 시트 공통 규칙: 0행 idle, 1행 run. 애니메이션은 전역 매니저라 1회만 등록.
+  private buildAnims() {
+    const def = (key: string, sheet: string, row: number, frames: number, rate: number) => {
+      if (this.anims.exists(key)) return;
+      const cols = SHEETS[sheet].cols;
+      this.anims.create({
+        key,
+        frames: this.anims.generateFrameNumbers(sheet, {
+          start: row * cols,
+          end: row * cols + frames - 1,
+        }),
+        frameRate: rate,
+        repeat: -1,
+      });
+    };
+    def('warriorBlue-idle', 'warriorBlue', 0, 6, 8);
+    def('warriorBlue-run', 'warriorBlue', 1, 6, 12);
+    def('warriorRed-run', 'warriorRed', 1, 6, 10);
+    for (const k of ['torchRed', 'torchYellow', 'torchPurple']) def(`${k}-run`, k, 1, 6, 10);
+    def('barrelRed-run', 'barrelRed', 1, 3, 8);
+    for (const k of ['tntBlue', 'tntRed', 'tntYellow']) def(`${k}-run`, k, 1, 6, 10);
+    if (!this.anims.exists('dynamite-spin')) {
+      this.anims.create({
+        key: 'dynamite-spin',
+        frames: this.anims.generateFrameNumbers('dynamite', { start: 0, end: 5 }),
+        frameRate: 12,
+        repeat: -1,
+      });
+    }
+  }
+
   private buildGaugePips() {
     this.gaugePips.forEach((p) => p.destroy());
     this.gaugePips = [];
@@ -495,7 +544,10 @@ class PrototypeScene extends Phaser.Scene {
     // 대시 잔상 — "발동했다"를 몸으로 보여준다.
     if (dashing) {
       const ghost = this.add
-        .image(this.player.x, this.player.y, 'player')
+        .image(this.player.x, this.player.y, 'warriorBlue', this.player.frame.name)
+        .setScale(0.42)
+        .setFlipX(this.player.flipX)
+        .setTint(0x7fd8ff)
         .setAlpha(0.35)
         .setDepth(this.player.depth - 1);
       this.tweens.add({ targets: ghost, alpha: 0, duration: 250, onComplete: () => ghost.destroy() });
@@ -517,6 +569,12 @@ class PrototypeScene extends Phaser.Scene {
     const move = dashing && dir.lengthSq() === 0 ? this.lastDir : dir;
     this.player.setVelocity(move.x * speed, move.y * speed);
     this.player.setAlpha(now < this.invincibleUntil ? 0.4 : 1);
+    if (dir.lengthSq() > 0 || dashing) {
+      this.player.play('warriorBlue-run', true);
+      if (move.x !== 0) this.player.setFlipX(move.x < 0);
+    } else {
+      this.player.play('warriorBlue-idle', true);
+    }
 
     // 자동공격은 게임 시간으로 진행 — 불릿타임 중엔 발사도 느려진다.
     this.fireCooldown -= deltaMs * this.worldSpeed;
@@ -581,6 +639,7 @@ class PrototypeScene extends Phaser.Scene {
       const seek = (tx: number, ty: number, spd: number) => {
         const aim = new Phaser.Math.Vector2(tx - enemy.x, ty - enemy.y).normalize().scale(spd);
         enemy.setVelocity(aim.x, aim.y);
+        if (Math.abs(aim.x) > 1) enemy.setFlipX(aim.x < 0);
       };
       const stats = KIND_STATS[enemy.kind ?? 'chaser'];
       const spd = stats.speed * speedMul;
@@ -604,7 +663,10 @@ class PrototypeScene extends Phaser.Scene {
               const base = Phaser.Math.Angle.Between(enemy.x, enemy.y, this.player.x, this.player.y);
               for (let k = 0; k < 4; k++) {
                 const angle = base + (Math.PI / 2) * k;
-                const bullet = this.physics.add.image(enemy.x, enemy.y, 'slimeBullet');
+                const bullet = this.physics.add.sprite(enemy.x, enemy.y, 'dynamite');
+                bullet.setScale(0.5);
+                bullet.body.setSize(24, 24);
+                bullet.play('dynamite-spin');
                 this.bossBullets.add(bullet);
                 bullet.setVelocity(
                   Math.cos(angle) * SLIME_BULLET_SPEED,
@@ -690,6 +752,7 @@ class PrototypeScene extends Phaser.Scene {
         .normalize()
         .scale(BOSS_SPEED);
       b.setVelocity(aim.x, aim.y);
+      if (Math.abs(aim.x) > 1) b.setFlipX(aim.x < 0);
       if (now >= this.bossNextVolley) {
         this.bossNextVolley = now + BOSS_VOLLEY_MS;
         for (let i = 0; i < 10; i++) {
@@ -699,7 +762,7 @@ class PrototypeScene extends Phaser.Scene {
           bullet.setVelocity(Math.cos(angle) * BOSS_BULLET_SPEED, Math.sin(angle) * BOSS_BULLET_SPEED);
         }
       }
-      this.bossBar?.setPosition(b.x - 30, b.y - 36);
+      this.bossBar?.setPosition(b.x - 30, b.y - 52);
       this.bossBar?.setSize(60 * Math.max(0, (b.hp ?? 0) / BOSS_HP), 5);
     }
     this.bossBullets.getChildren().forEach((obj) => {
@@ -741,10 +804,13 @@ class PrototypeScene extends Phaser.Scene {
     const spread = Phaser.Math.DegToRad(8);
     for (let i = 0; i < this.projectileCount; i++) {
       const angle = baseAngle + spread * (i - (this.projectileCount - 1) / 2);
-      const p = this.physics.add.image(this.player.x, this.player.y, 'projectile');
+      const p = this.physics.add.image(this.player.x, this.player.y, 'arrow');
+      p.setScale(0.35);
+      p.body.setSize(28, 28);
       this.projectiles.add(p);
       p.setVelocity(Math.cos(angle) * PROJECTILE_SPEED, Math.sin(angle) * PROJECTILE_SPEED);
-      p.setRotation(angle);
+      // Arrow.png는 위를 향하므로 +90도 보정.
+      p.setRotation(angle + Math.PI / 2);
     }
     this.synth.shoot();
   }
@@ -905,7 +971,11 @@ class PrototypeScene extends Phaser.Scene {
 
   private spawnBoss() {
     this.bossSpawned = true;
-    const boss = this.physics.add.image(WIDTH / 2, -60, 'boss') as Enemy;
+    const boss = this.physics.add.sprite(WIDTH / 2, -60, 'warriorRed') as Enemy;
+    boss.setScale(0.9);
+    boss.body.setSize(70, 80);
+    boss.play('warriorRed-run');
+    boss.setDepth(1);
     boss.hp = BOSS_HP;
     this.boss = boss;
     this.bossNextVolley = this.time.now + 1500;
@@ -1045,7 +1115,10 @@ class PrototypeScene extends Phaser.Scene {
     if (this.dead) return;
     const kind = this.pickKind();
     const stats = KIND_STATS[kind];
-    const enemy = this.physics.add.image(x, y, stats.tex) as Enemy;
+    const enemy = this.physics.add.sprite(x, y, stats.tex) as Enemy;
+    enemy.setScale(stats.scale);
+    enemy.body.setSize(stats.body, stats.body);
+    enemy.play(`${stats.tex}-run`);
     enemy.kind = kind;
     enemy.hp = stats.hp;
     enemy.mode = 'seek';
@@ -1060,7 +1133,9 @@ class PrototypeScene extends Phaser.Scene {
     a.destroy();
     b.destroy();
     const stats = SLIME_STAGES[stage - 1];
-    const merged = this.physics.add.image(x, y, stats.tex) as Enemy;
+    const merged = this.physics.add.sprite(x, y, stats.tex) as Enemy;
+    merged.body.setSize(stats.body, stats.body);
+    merged.play(`${stats.tex}-run`);
     merged.kind = 'slime';
     merged.stage = stage;
     merged.hp = stats.hp;
@@ -1068,8 +1143,8 @@ class PrototypeScene extends Phaser.Scene {
     merged.nextShotAt = this.time.now + 1200;
     this.enemies.add(merged);
     // 합체 연출: 팝 스케일 + 파편 + 저음 — 인과가 보여야 "끊어라" 결정이 성립한다.
-    merged.setScale(0.4);
-    this.tweens.add({ targets: merged, scale: 1, duration: 180, ease: 'Back.easeOut' });
+    merged.setScale(stats.scale * 0.4);
+    this.tweens.add({ targets: merged, scale: stats.scale, duration: 180, ease: 'Back.easeOut' });
     this.sparks.explode(10, x, y);
     this.synth.merge();
   }

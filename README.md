@@ -15,6 +15,11 @@ npm install
 npm run dev
 ```
 
+## 외부 에셋
+
+- 스프라이트: [Tiny Swords](https://pixelfrog-assets.itch.io/tiny-swords) by Pixel Frog — **구버전 "TS_old version_CC0 Licensed" 사용 (CC0 1.0, 퍼블릭 도메인)**. 신버전(Free Pack)은 재배포 금지 조항이 있어 public 리포에 부적합하므로 CC0 명시 구버전을 채택함.
+- 사운드: 외부 에셋 없음 — WebAudio 신스로 코드 생성.
+
 ## 문서
 
 - [CONTEXT.md](./CONTEXT.md) — 프로젝트 용어집
