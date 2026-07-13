@@ -221,7 +221,120 @@ const UPGRADE_DEFS: UpgradeDef[] = [
   },
 ];
 
+// 시트 공통 규칙: 0행 idle, 1행 run. 애니메이션은 전역 매니저라 1회만 등록.
+function buildAnims(scene: Phaser.Scene) {
+  const def = (key: string, sheet: string, row: number, frames: number, rate: number) => {
+    if (scene.anims.exists(key)) return;
+    const cols = SHEETS[sheet].cols;
+    scene.anims.create({
+      key,
+      frames: scene.anims.generateFrameNumbers(sheet, {
+        start: row * cols,
+        end: row * cols + frames - 1,
+      }),
+      frameRate: rate,
+      repeat: -1,
+    });
+  };
+  def('warriorBlue-idle', 'warriorBlue', 0, 6, 8);
+  def('warriorBlue-run', 'warriorBlue', 1, 6, 12);
+  def('warriorRed-run', 'warriorRed', 1, 6, 10);
+  for (const k of ['torchRed', 'torchYellow', 'torchPurple']) def(`${k}-run`, k, 1, 6, 10);
+  def('barrelRed-run', 'barrelRed', 1, 3, 8);
+  for (const k of ['tntBlue', 'tntRed', 'tntYellow']) def(`${k}-run`, k, 1, 6, 10);
+  if (!scene.anims.exists('dynamite-spin')) {
+    scene.anims.create({
+      key: 'dynamite-spin',
+      frames: scene.anims.generateFrameNumbers('dynamite', { start: 0, end: 5 }),
+      frameRate: 12,
+      repeat: -1,
+    });
+  }
+}
+
+class TitleScene extends Phaser.Scene {
+  constructor() {
+    super('title');
+  }
+
+  preload() {
+    this.load.setPath('assets/tiny-swords/');
+    Object.entries(SHEETS).forEach(([key, s]) =>
+      this.load.spritesheet(key, s.file, { frameWidth: 192, frameHeight: 192 }),
+    );
+    this.load.image('arrow', 'Arrow.png');
+    this.load.spritesheet('dynamite', 'Dynamite.png', { frameWidth: 64, frameHeight: 64 });
+    this.load.setPath('');
+  }
+
+  create() {
+    // 애니메이션은 전역 매니저 — 타이틀에서 1회 등록하면 게임 씬도 쓴다.
+    buildAnims(this);
+
+    this.add
+      .text(WIDTH / 2, 110, 'STILL ALIVE', {
+        fontSize: '72px',
+        fontStyle: 'bold',
+        color: '#7fd8ff',
+      })
+      .setOrigin(0.5);
+    this.add
+      .text(WIDTH / 2, 168, '멈춰야 산다', { fontSize: '26px', color: '#e8e8f0' })
+      .setOrigin(0.5);
+
+    const hero = this.add.sprite(WIDTH / 2, 300, 'warriorBlue').setScale(1.1);
+    hero.play('warriorBlue-idle');
+
+    // 좌우를 배회하는 고블린 — 살아있는 화면.
+    const goblin = this.add.sprite(WIDTH / 2 - 260, 330, 'torchRed').setScale(0.5);
+    goblin.play('torchRed-run');
+    this.tweens.add({
+      targets: goblin,
+      x: WIDTH / 2 + 260,
+      duration: 5200,
+      yoyo: true,
+      repeat: -1,
+      onYoyo: () => goblin.setFlipX(true),
+      onRepeat: () => goblin.setFlipX(false),
+    });
+
+    this.add
+      .text(
+        WIDTH / 2,
+        418,
+        '멈춰 서면 집중이 차오른다 — 그 집중으로 대시(스페이스)와 불릿타임(Shift)을 산다',
+        { fontSize: '16px', color: '#9aa0b0' },
+      )
+      .setOrigin(0.5);
+    this.add
+      .text(WIDTH / 2, 446, 'WASD 이동 · 스페이스 대시 · Shift 불릿타임 · ESC 일시정지', {
+        fontSize: '15px',
+        color: '#9aa0b0',
+      })
+      .setOrigin(0.5);
+
+    const high = Number(localStorage.getItem('highScore') ?? 0);
+    if (high > 0) {
+      this.add
+        .text(WIDTH / 2, 62, `최고 기록 ${high}`, { fontSize: '16px', color: '#ffd23f' })
+        .setOrigin(0.5);
+    }
+
+    const prompt = this.add
+      .text(WIDTH / 2, 496, '아무 키나 눌러 시작', { fontSize: '22px', color: '#ffd23f' })
+      .setOrigin(0.5);
+    this.tweens.add({ targets: prompt, alpha: 0.25, duration: 700, yoyo: true, repeat: -1 });
+
+    this.input.keyboard!.once('keydown', () => this.scene.start('game'));
+    this.input.once('pointerdown', () => this.scene.start('game'));
+  }
+}
+
 class PrototypeScene extends Phaser.Scene {
+  constructor() {
+    super('game');
+  }
+
   private player!: Phaser.Types.Physics.Arcade.SpriteWithDynamicBody;
   private enemies!: Phaser.Physics.Arcade.Group;
   private projectiles!: Phaser.Physics.Arcade.Group;
@@ -308,7 +421,7 @@ class PrototypeScene extends Phaser.Scene {
     g.clear().fillStyle(0x5be07a).fillRect(2, 0, 4, 8).fillRect(0, 2, 8, 4).generateTexture('gem', 8, 8);
     g.destroy();
 
-    this.buildAnims();
+    buildAnims(this);
 
     this.player = this.physics.add.sprite(WIDTH / 2, HEIGHT / 2, 'warriorBlue');
     this.player.setScale(0.42);
@@ -449,47 +562,6 @@ class PrototypeScene extends Phaser.Scene {
   }
 
   private gaugeLabel?: Phaser.GameObjects.Text;
-
-  preload() {
-    this.load.setPath('assets/tiny-swords/');
-    Object.entries(SHEETS).forEach(([key, s]) =>
-      this.load.spritesheet(key, s.file, { frameWidth: 192, frameHeight: 192 }),
-    );
-    this.load.image('arrow', 'Arrow.png');
-    this.load.spritesheet('dynamite', 'Dynamite.png', { frameWidth: 64, frameHeight: 64 });
-    this.load.setPath('');
-  }
-
-  // 시트 공통 규칙: 0행 idle, 1행 run. 애니메이션은 전역 매니저라 1회만 등록.
-  private buildAnims() {
-    const def = (key: string, sheet: string, row: number, frames: number, rate: number) => {
-      if (this.anims.exists(key)) return;
-      const cols = SHEETS[sheet].cols;
-      this.anims.create({
-        key,
-        frames: this.anims.generateFrameNumbers(sheet, {
-          start: row * cols,
-          end: row * cols + frames - 1,
-        }),
-        frameRate: rate,
-        repeat: -1,
-      });
-    };
-    def('warriorBlue-idle', 'warriorBlue', 0, 6, 8);
-    def('warriorBlue-run', 'warriorBlue', 1, 6, 12);
-    def('warriorRed-run', 'warriorRed', 1, 6, 10);
-    for (const k of ['torchRed', 'torchYellow', 'torchPurple']) def(`${k}-run`, k, 1, 6, 10);
-    def('barrelRed-run', 'barrelRed', 1, 3, 8);
-    for (const k of ['tntBlue', 'tntRed', 'tntYellow']) def(`${k}-run`, k, 1, 6, 10);
-    if (!this.anims.exists('dynamite-spin')) {
-      this.anims.create({
-        key: 'dynamite-spin',
-        frames: this.anims.generateFrameNumbers('dynamite', { start: 0, end: 5 }),
-        frameRate: 12,
-        repeat: -1,
-      });
-    }
-  }
 
   private buildGaugePips() {
     this.gaugePips.forEach((p) => p.destroy());
@@ -1039,13 +1111,14 @@ class PrototypeScene extends Phaser.Scene {
       .setOrigin(0.5)
       .setDepth(21);
     this.add
-      .text(WIDTH / 2, HEIGHT / 2 + 44, 'R 또는 스페이스 — 즉시 재시작', {
+      .text(WIDTH / 2, HEIGHT / 2 + 44, 'R 또는 스페이스 — 즉시 재시작 · ESC — 타이틀로', {
         fontSize: '18px',
         color: '#ffd23f',
       })
       .setOrigin(0.5)
       .setDepth(21);
     this.input.keyboard!.once('keydown-SPACE', () => this.scene.restart());
+    this.input.keyboard!.once('keydown-ESC', () => this.scene.start('title'));
   }
 
   // 게임 시간 기준 경과 초 — 불릿타임은 난이도 시계도 늦춘다 (시간=자원 정체성).
@@ -1166,5 +1239,5 @@ new Phaser.Game({
     mode: Phaser.Scale.FIT,
     autoCenter: Phaser.Scale.CENTER_BOTH,
   },
-  scene: PrototypeScene,
+  scene: [TitleScene, PrototypeScene],
 });
