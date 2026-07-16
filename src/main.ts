@@ -378,6 +378,9 @@ class PrototypeScene extends Phaser.Scene {
   // Phaser의 time.now는 timeScale을 무시하는 실시간이라 세계 시간은 직접 굴려야 한다.
   // 플레이어 쪽(대시·무적)과 콤보는 실시간 유지.
   private gameNow = 0;
+  // 플레이어 실시간: worldSpeed 무시, 일시정지·레벨업·탭 이탈 중엔 멈춘다.
+  // Phaser time.now는 정지 중에도 흘러 대시·무적·불릿타임 선불이 증발하므로 직접 누적.
+  private realNow = 0;
   private bulletEngaged = false;
   private bulletPrepaidUntil = 0;
   private lastDir = new Phaser.Math.Vector2(0, -1);
@@ -429,6 +432,10 @@ class PrototypeScene extends Phaser.Scene {
     this.levelKeys = [];
     this.worldSpeed = 1;
     this.gameNow = 0;
+    this.realNow = 0;
+    // 재시작 시 이전 런의 마감시각이 남지 않게 리셋. 락아웃은 첫 대시를 막지 않게 음수로.
+    this.dashUntil = -DASH_LOCKOUT_MS;
+    this.invincibleUntil = 0;
     this.bulletEngaged = false;
     this.bulletPrepaidUntil = 0;
     this.score = 0;
@@ -562,6 +569,19 @@ class PrototypeScene extends Phaser.Scene {
     kb.addKey(Phaser.Input.Keyboard.KeyCodes.R).on('down', () => this.scene.restart());
     kb.addKey(Phaser.Input.Keyboard.KeyCodes.ESC).on('down', () => this.togglePause());
 
+    // 알탭 자동 일시정지 — BLUR는 창이 보인 채 포커스만 잃는 경우(듀얼 모니터),
+    // PAUSE는 탭 숨김·최소화(visibilitychange). 복귀가 일시정지 화면에서 시작된다.
+    const autoPause = () => {
+      if (!this.paused) this.togglePause();
+    };
+    this.game.events.on(Phaser.Core.Events.BLUR, autoPause);
+    this.game.events.on(Phaser.Core.Events.PAUSE, autoPause);
+    // game.events는 씬 재시작 후에도 살아 있어 핸들러가 쌓인다 — 종료 시 해제.
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.game.events.off(Phaser.Core.Events.BLUR, autoPause);
+      this.game.events.off(Phaser.Core.Events.PAUSE, autoPause);
+    });
+
     // 첫 런 한정 도구 가이드 — 재시작 루프를 방해하지 않게 registry로 1회만.
     if (!this.registry.get('guideSeen')) {
       this.registry.set('guideSeen', true);
@@ -628,6 +648,8 @@ class PrototypeScene extends Phaser.Scene {
   update(_time: number, deltaMs: number) {
     if (this.dead || this.paused || this.choosing) return;
 
+    this.realNow += deltaMs;
+
     // 히트스톱: 묵직한 킬의 실시간 정지 — 짧아서 콤보 타이머 정지는 무시 가능.
     if (this.hitstopMs > 0) {
       this.hitstopMs -= deltaMs;
@@ -636,7 +658,7 @@ class PrototypeScene extends Phaser.Scene {
       this.player.setVelocity(0, 0);
       return;
     }
-    const now = this.time.now;
+    const now = this.realNow;
 
     const dir = new Phaser.Math.Vector2(
       Number(this.cursors.right.isDown || this.wasd.right.isDown) -
@@ -1106,7 +1128,7 @@ class PrototypeScene extends Phaser.Scene {
   }
 
   private onPlayerHit() {
-    if (this.dead || this.time.now < this.invincibleUntil) return;
+    if (this.dead || this.realNow < this.invincibleUntil) return;
     this.synth.death();
     this.cameras.main.shake(250, 0.01);
     this.sparks.explode(24, this.player.x, this.player.y);
