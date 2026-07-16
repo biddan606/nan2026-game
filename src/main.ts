@@ -361,6 +361,8 @@ class PrototypeScene extends Phaser.Scene {
   private dim!: Phaser.GameObjects.Rectangle;
   private hud!: Phaser.GameObjects.Text;
   private comboBar!: Phaser.GameObjects.Rectangle;
+  private comboLabel!: Phaser.GameObjects.Text;
+  private xpLabel!: Phaser.GameObjects.Text;
   private gaugePips: Phaser.GameObjects.Rectangle[] = [];
 
   private worldSpeed = 1;
@@ -500,8 +502,16 @@ class PrototypeScene extends Phaser.Scene {
       .rectangle(12, 56, 0, 5, 0xffd23f)
       .setOrigin(0, 0.5)
       .setDepth(11);
+    this.comboLabel = this.add
+      .text(12 + 120 + 6, 56, '', { fontSize: '13px', color: '#ffd23f' })
+      .setOrigin(0, 0.5)
+      .setDepth(11);
     this.xpBar = this.add
       .rectangle(12, 66, 0, 5, 0x5be07a)
+      .setOrigin(0, 0.5)
+      .setDepth(11);
+    this.xpLabel = this.add
+      .text(12 + 150 + 6, 66, '', { fontSize: '13px', color: '#5be07a' })
       .setOrigin(0, 0.5)
       .setDepth(11);
     this.buildGaugePips();
@@ -889,12 +899,14 @@ class PrototypeScene extends Phaser.Scene {
     });
     const t = Math.floor(this.elapsedSec());
     const clock = `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
-    this.hud.setText(
-      `${clock}   Lv${this.level}   점수 ${this.score}` +
-        (this.combo > 0 ? `   콤보 x${(1 + this.combo * 0.1).toFixed(1)}` : ''),
-    );
-    this.xpBar.width = 150 * Phaser.Math.Clamp(this.xp / this.xpNeed(), 0, 1);
+    this.hud.setText(`${clock}   점수 ${this.score}`);
+    const xpRatio = Phaser.Math.Clamp(this.xp / this.xpNeed(), 0, 1);
+    this.xpBar.width = 150 * xpRatio;
+    this.xpLabel.setText(`Lv${this.level} ${Math.floor(xpRatio * 100)}%`);
     this.comboBar.width = this.combo > 0 ? 120 * (this.comboTimeLeft / COMBO_WINDOW_MS) : 0;
+    this.comboLabel.setText(
+      this.combo > 0 ? `콤보 x${(1 + this.combo * 0.1).toFixed(1)}` : '',
+    );
     this.gaugePips.forEach((pip, i) => {
       const fill = Phaser.Math.Clamp(this.gauge - i, 0, 1);
       pip.setAlpha(0.25 + 0.75 * fill);
