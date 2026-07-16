@@ -223,15 +223,16 @@ const UPGRADE_DEFS: UpgradeDef[] = [
   {
     key: 'gauge',
     name: '집중',
-    blurb: '멈춰 서 있으면 차오르는 파란 게이지 — 대시(스페이스)와 불릿타임(Shift)의 연료. 칸이 늘고 충전도 빨라진다.',
+    blurb: '멈춰 서면 차오르는 파란 게이지 — 대시와 불릿타임의 연료. 칸이 늘고 충전도 빨라진다.',
     max: 3,
     // 용량만 키우면 풀차지 대기시간도 같이 늘어 후반 픽 체감이 죽는다 — 충전 가속 동봉.
     apply: (s) => {
       s.gaugeMax += 1;
       s.gaugeChargeMs *= 0.9;
     },
+    // 두 수치라 한 줄로는 카드 폭(260px)을 넘친다 — 명시적 줄바꿈.
     info: (s) =>
-      `최대 ${s.gaugeMax}칸 → ${s.gaugeMax + 1}칸 · 충전 ${(s.gaugeChargeMs / 1000).toFixed(2)}초/칸 → ${((s.gaugeChargeMs * 0.9) / 1000).toFixed(2)}초/칸`,
+      `최대 ${s.gaugeMax}칸 → ${s.gaugeMax + 1}칸\n충전 ${(s.gaugeChargeMs / 1000).toFixed(2)} → ${((s.gaugeChargeMs * 0.9) / 1000).toFixed(2)}초/칸`,
   },
   {
     key: 'magnet',
@@ -1051,7 +1052,12 @@ class PrototypeScene extends Phaser.Scene {
           })
           .setOrigin(0.5, 0),
         this.add
-          .text(x, cy + 45, def.info(this), { fontSize: '16px', color: '#5be07a' })
+          .text(x, cy + 45, def.info(this), {
+            fontSize: '16px',
+            color: '#5be07a',
+            align: 'center',
+            wordWrap: { width: 230 },
+          })
           .setOrigin(0.5),
         this.add
           .text(x, cy + 75, `보유 ${owned}${def.max ? ` / 최대 ${def.max}` : ''}`, {
