@@ -34,6 +34,10 @@ const DENSITY_GROWTH_SEC = 10; // N초마다 최소 밀도 +1
 const PULSE_INTERVAL_MS = 45_000;
 const VALLEY_MS = 10_000;
 const SPEED_GROWTH = 0.002; // 초당 적 속도 증가율 (선형, 상한 1.6배)
+// 격노: 오래 산 몹은 빨라지고 붉어진다 — "안 죽이고 방치"가 안전하지 않게.
+const ENRAGE_MS = 25_000;
+const ENRAGE_SPEED_MUL = 1.4;
+const ENRAGE_TINT = 0xff5a5a;
 
 type EnemyKind = 'chaser' | 'inter' | 'tank' | 'charger' | 'slime';
 
@@ -53,9 +57,9 @@ const SHEETS: Record<string, { file: string; cols: number }> = {
 // 슬라임: 같은 단계끼리 서로를 찾아가 합체. 소(1)→중(2합체)→대(4합체 상당).
 // 대형은 원거리 탄막 — 합체 방치의 대가가 탄막 유닛이다.
 const SLIME_STAGES = [
-  { tex: 'tntBlue', hp: 1, speed: 85, score: 12, gems: 1, scale: 0.3, body: 55 },
-  { tex: 'tntRed', hp: 3, speed: 115, score: 25, gems: 2, scale: 0.42, body: 60 },
-  { tex: 'tntYellow', hp: 8, speed: 50, score: 60, gems: 4, scale: 0.58, body: 70 },
+  { tex: 'tntBlue', hp: 1, speed: 85, score: 12, gems: 1, scale: 0.3, body: 55, threat: 1 },
+  { tex: 'tntRed', hp: 3, speed: 115, score: 25, gems: 2, scale: 0.42, body: 60, threat: 2 },
+  { tex: 'tntYellow', hp: 8, speed: 50, score: 60, gems: 4, scale: 0.58, body: 70, threat: 4 },
 ];
 const SLIME_SEEK_RADIUS = 150;
 const SLIME_MERGE_DIST = [22, 30];
@@ -63,15 +67,17 @@ const MAX_LARGE_SLIMES = 2;
 const SLIME_VOLLEY_MS = 3000;
 const SLIME_BULLET_SPEED = 140;
 
+// threat: 위협 가중 쿼터용 점수 — 밀도를 마리 수가 아닌 위협 합으로 잰다.
+// 약한 몹만 살려둬도 쿼터가 안 차서 신규 스폰을 막을 수 없다 (호딩 견제).
 const KIND_STATS: Record<
   EnemyKind,
-  { tex: string; hp: number; speed: number; score: number; gems: number; scale: number; body: number }
+  { tex: string; hp: number; speed: number; score: number; gems: number; scale: number; body: number; threat: number }
 > = {
-  chaser: { tex: 'torchRed', hp: 1, speed: 95, score: 10, gems: 1, scale: 0.38, body: 55 },
-  inter: { tex: 'torchYellow', hp: 1, speed: 105, score: 15, gems: 1, scale: 0.38, body: 55 },
-  tank: { tex: 'barrelRed', hp: 3, speed: 55, score: 20, gems: 2, scale: 0.44, body: 65 },
-  charger: { tex: 'torchPurple', hp: 2, speed: 80, score: 20, gems: 2, scale: 0.4, body: 55 },
-  slime: { tex: 'tntBlue', hp: 1, speed: 85, score: 12, gems: 1, scale: 0.3, body: 55 },
+  chaser: { tex: 'torchRed', hp: 1, speed: 95, score: 10, gems: 1, scale: 0.38, body: 55, threat: 1 },
+  inter: { tex: 'torchYellow', hp: 1, speed: 105, score: 15, gems: 1, scale: 0.38, body: 55, threat: 2 },
+  tank: { tex: 'barrelRed', hp: 3, speed: 55, score: 20, gems: 2, scale: 0.44, body: 65, threat: 3 },
+  charger: { tex: 'torchPurple', hp: 2, speed: 80, score: 20, gems: 2, scale: 0.4, body: 55, threat: 3 },
+  slime: { tex: 'tntBlue', hp: 1, speed: 85, score: 12, gems: 1, scale: 0.3, body: 55, threat: 1 },
 };
 
 type Enemy = Phaser.Types.Physics.Arcade.SpriteWithDynamicBody & {
@@ -82,6 +88,7 @@ type Enemy = Phaser.Types.Physics.Arcade.SpriteWithDynamicBody & {
   chargeDir?: Phaser.Math.Vector2;
   stage?: number; // 슬라임 전용: 1(소) 2(중) 3(대)
   nextShotAt?: number; // 슬라임 대형 전용
+  spawnedAt?: number; // 격노 판정용
 };
 
 // 보스: 5분 도달 시 등장, 처치하면 클리어.
@@ -714,7 +721,10 @@ class PrototypeScene extends Phaser.Scene {
         if (Math.abs(aim.x) > 1) enemy.setFlipX(aim.x < 0);
       };
       const stats = KIND_STATS[enemy.kind ?? 'chaser'];
-      const spd = stats.speed * speedMul;
+      // 격노: 나이가 임계를 넘으면 가속 + 붉은 틴트. 되돌아가지 않는다.
+      const enrageMul = now - (enemy.spawnedAt ?? now) >= ENRAGE_MS ? ENRAGE_SPEED_MUL : 1;
+      if (enrageMul > 1) enemy.setTint(ENRAGE_TINT);
+      const spd = stats.speed * speedMul * enrageMul;
       switch (enemy.kind) {
         case 'inter':
           seek(
@@ -726,7 +736,7 @@ class PrototypeScene extends Phaser.Scene {
         case 'slime': {
           const stage = enemy.stage ?? 1;
           const sStats = SLIME_STAGES[stage - 1];
-          const sSpd = sStats.speed * speedMul;
+          const sSpd = sStats.speed * speedMul * enrageMul;
           if (stage === 3) {
             // 대형: 느린 추적 + 주기적 4방향 탄. 합체 방치의 대가.
             seek(this.player.x, this.player.y, sSpd);
@@ -785,8 +795,8 @@ class PrototypeScene extends Phaser.Scene {
           } else if (enemy.mode === 'charge') {
             const d = enemy.chargeDir!;
             enemy.setVelocity(
-              d.x * CHARGER_CHARGE_SPEED * speedMul,
-              d.y * CHARGER_CHARGE_SPEED * speedMul,
+              d.x * CHARGER_CHARGE_SPEED * speedMul * enrageMul,
+              d.y * CHARGER_CHARGE_SPEED * speedMul * enrageMul,
             );
             if (now >= (enemy.modeUntil ?? 0)) enemy.mode = 'seek';
           } else {
@@ -1130,6 +1140,20 @@ class PrototypeScene extends Phaser.Scene {
     return BASE_MIN_DENSITY + Math.floor(this.elapsedSec() / DENSITY_GROWTH_SEC);
   }
 
+  // 현재 위협 합. 쿼터는 이 값과 비교한다 — 마리 수가 아니라.
+  private currentThreat(): number {
+    let sum = 0;
+    this.enemies.getChildren().forEach((obj) => {
+      const e = obj as Enemy;
+      if (!e.active) return;
+      sum +=
+        e.kind === 'slime'
+          ? SLIME_STAGES[(e.stage ?? 1) - 1].threat
+          : KIND_STATS[e.kind ?? 'chaser'].threat;
+    });
+    return sum;
+  }
+
   private directorTick() {
     if (this.dead) return;
     const now = this.time.now;
@@ -1150,9 +1174,8 @@ class PrototypeScene extends Phaser.Scene {
       return;
     }
 
-    // 최소 밀도 쿼터: 미달이면 즉시 채움 (틱당 8마리 상한 — 프레임 히치 방지).
-    const alive = this.enemies.countActive(true);
-    const deficit = this.minDensity() - alive;
+    // 최소 밀도 쿼터: 위협 점수 미달이면 즉시 채움 (틱당 8마리 상한 — 프레임 히치 방지).
+    const deficit = this.minDensity() - this.currentThreat();
     if (deficit > 0) {
       for (let i = 0; i < Math.min(deficit, 8); i++) this.spawnEnemy();
       return;
@@ -1195,6 +1218,7 @@ class PrototypeScene extends Phaser.Scene {
     enemy.kind = kind;
     enemy.hp = stats.hp;
     enemy.mode = 'seek';
+    enemy.spawnedAt = this.time.now;
     if (kind === 'slime') enemy.stage = 1;
     this.enemies.add(enemy);
   }
@@ -1213,6 +1237,7 @@ class PrototypeScene extends Phaser.Scene {
     merged.stage = stage;
     merged.hp = stats.hp;
     merged.mode = 'seek';
+    merged.spawnedAt = this.time.now; // 합체 = 새 개체, 격노 타이머 리셋
     merged.nextShotAt = this.time.now + 1200;
     this.enemies.add(merged);
     // 합체 연출: 팝 스케일 + 파편 + 저음 — 인과가 보여야 "끊어라" 결정이 성립한다.
