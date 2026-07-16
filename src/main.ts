@@ -19,12 +19,14 @@ const GEM_PULL_SPEED = 340;
 const MAX_GEMS = 200;
 // 불릿타임 중 세상 배율. 0이면 물리 엔진 나눗셈이 터진다.
 const BULLET_TIME_SCALE = 0.2;
-// 불릿타임 유지 비용: 게이지 1칸이 버티는 시간.
-const BULLET_DRAIN_MS = 800;
-// 불릿타임 발동세: 시작할 때 1칸 선불. 그 값어치(0.8초)는 선불 시간으로 즉시 확보되므로
+// 불릿타임 유지 비용: 게이지 1칸이 버티는 시간. 800이던 시절엔 풀게이지로 2.4초 —
+// 위기를 통째로 건너뛰기 충분했다. 500으로 줄여 풀게이지 1.5초: 짧고 굵은 순간기로.
+const BULLET_DRAIN_MS = 500;
+// 불릿타임 발동세: 시작할 때 1.5칸 선불. 그 값어치(0.75초)는 선불 시간으로 즉시 확보되므로
 // 끝까지 쓰면 손해가 없고, 찔끔 쓰고 끊으면 남은 선불을 버린다 — 짧은 남용만 비싸진다.
-// 전량 커밋(궁극기) 정체성 + 게이지 0 근처 재점화 익스플로잇 차단을 겸한다.
-const BULLET_ACTIVATION_COST = 1;
+// 1칸이던 시절엔 위기마다 짧게 탭해도 대시보다 싼 만능 탈출 버튼이었다(플레이테스트).
+// 1.5칸 = 대시 3회 값 = 기본 게이지의 절반: 전량 커밋(궁극기) 정체성을 가격으로 강제한다.
+const BULLET_ACTIVATION_COST = 1.5;
 // 콤보는 실시간으로 식는다 — 시간을 멈춰도 보존되지 않는 게 핵심 규칙.
 const COMBO_WINDOW_MS = 2500;
 const GAUGE_MAX = 3;
@@ -562,7 +564,7 @@ class PrototypeScene extends Phaser.Scene {
             .text(
               WIDTH / 2,
               170,
-              '스페이스 — 대시(반 칸): 무적으로 적 벽을 뚫는다\nShift 홀드 — 불릿타임(시작 1칸 + 유지): 세상만 느려지고 나는 그대로\n멈춰 서면 파란 집중 게이지가 차오른다 (둘의 연료)',
+              '스페이스 — 대시(반 칸): 무적으로 적 벽을 뚫는다\nShift 홀드 — 불릿타임(시작 1.5칸 + 유지): 세상만 느려지고 나는 그대로\n멈춰 서면 파란 집중 게이지가 차오른다 (둘의 연료)',
               { fontSize: '17px', color: '#e8e8f0', align: 'center', lineSpacing: 10 },
             )
             .setOrigin(0.5)
@@ -661,14 +663,14 @@ class PrototypeScene extends Phaser.Scene {
     }
 
     // 세상은 항상 정상 속도. 슬로우모는 Shift 홀드로 게이지를 태울 때만 (ADR-0003).
-    // 발동세 1칸 선불 → 0.8초 선불 시간 확보, 이후 잔여 게이지를 이어서 태운다.
+    // 발동세 1.5칸 선불 → 0.75초 선불 시간 확보, 이후 잔여 게이지를 이어서 태운다.
     if (
       !this.bulletEngaged &&
       Phaser.Input.Keyboard.JustDown(this.bulletKey) &&
       this.gauge >= BULLET_ACTIVATION_COST
     ) {
       this.gauge -= BULLET_ACTIVATION_COST;
-      this.bulletPrepaidUntil = now + BULLET_DRAIN_MS;
+      this.bulletPrepaidUntil = now + BULLET_DRAIN_MS * BULLET_ACTIVATION_COST;
       this.bulletEngaged = true;
     }
     const prepaid = now < this.bulletPrepaidUntil;
