@@ -6,11 +6,12 @@ const PLAYER_SPEED = 220;
 const PROJECTILE_SPEED = 380;
 // 예측자: 플레이어 실속도 × 리드 시간 지점을 조준 — 경로 탐색 없이 "앞을 막는" 체감.
 const INTERCEPT_LEAD_SEC = 0.6;
-// 돌진자: 사거리 안에서 경고 점멸 후 직선 돌진. 경고가 공정성을 만든다.
+// 돌진자: 사거리 안에서 돌진 경로 예고선을 보여준 뒤 직선 돌진. 예고가 공정성을 만든다.
+// 점멸이던 시절 "노이즈만 있고 게임성이 없다"는 피드백 — 선은 피할 방향까지 알려준다.
 const CHARGER_RANGE = 250;
-const CHARGER_WINDUP_MS = 650;
+const CHARGER_WINDUP_MS = 450;
 const CHARGER_CHARGE_MS = 700;
-const CHARGER_CHARGE_SPEED = 330;
+const CHARGER_CHARGE_SPEED = 400;
 // 시작은 약하게 — 초반은 도망과 수집이 본업, 성장이 재미를 견인한다.
 const START_FIRE_INTERVAL = 900;
 const START_MAGNET_RADIUS = 60;
@@ -39,10 +40,10 @@ const DASH_LOCKOUT_MS = 400;
 // 난이도 디렉터 (ADR 참고: VS 쿼터 + sqrt 곡선 + L4D 피크·밸리)
 const DIRECTOR_TICK_MS = 250;
 const BASE_MIN_DENSITY = 12;
-const DENSITY_GROWTH_SEC = 10; // N초마다 최소 밀도 +1
+const DENSITY_GROWTH_SEC = 7; // N초마다 최소 밀도 +1 — 박진감은 HP가 아니라 마리 수가 만든다
 const PULSE_INTERVAL_MS = 45_000;
 const VALLEY_MS = 10_000;
-const SPEED_GROWTH = 0.002; // 초당 적 속도 증가율 (선형, 상한 1.6배)
+const SPEED_GROWTH = 0.002; // 초당 적 속도 증가율 (선형, 상한 1.75배)
 // 격노: 오래 산 몹은 빨라지고 붉어진다 — "안 죽이고 방치"가 안전하지 않게.
 const ENRAGE_MS = 25_000;
 const ENRAGE_SPEED_MUL = 1.4;
@@ -98,11 +99,15 @@ type Enemy = Phaser.Types.Physics.Arcade.SpriteWithDynamicBody & {
   stage?: number; // 슬라임 전용: 1(소) 2(중) 3(대)
   nextShotAt?: number; // 슬라임 대형 전용
   spawnedAt?: number; // 격노 판정용
+  flashUntil?: number; // 비살상 타격 섬광 스로틀 — 연사에 스트로브 방지
 };
 
 // 보스: 5분 도달 시 등장, 처치하면 클리어.
 const BOSS_AT_SEC = 300;
-const BOSS_HP = 90;
+// 보스 HP = 등장 시점 플레이어 이론 DPS × 목표 교전 시간. 고정값(90)은 후반 빌드에 3초 컷,
+// 레벨 연동(레벨×10)도 공속캡 빌드엔 4~5초 컷이었다 — 어떤 빌드든 탄막 4~5회는 보게 만든다.
+const BOSS_FIGHT_SEC = 18;
+const BOSS_HP_MIN = 120;
 const BOSS_SPEED = 40;
 const BOSS_VOLLEY_MS = 3500;
 const BOSS_BULLET_SPEED = 150;
@@ -194,6 +199,9 @@ const UPGRADE_DEFS: UpgradeDef[] = [
     key: 'rate',
     name: '공속',
     blurb: '자동 공격이 더 자주 나간다.',
+    // 곱연산 스택이라 무제한이면 지수 성장 — 2분 30초에 스폰 유입을 추월해
+    // 화면 청소 상태로 고정된다(시뮬). 캡 7 = 288ms 간격, 유입과 균형 맞는 상한.
+    max: 7,
     apply: (s) => (s.fireInterval *= 0.85),
     info: (s) => `발사 간격 ${(s.fireInterval / 1000).toFixed(2)}초 → ${((s.fireInterval * 0.85) / 1000).toFixed(2)}초`,
   },
@@ -238,6 +246,9 @@ const UPGRADE_DEFS: UpgradeDef[] = [
     key: 'magnet',
     name: '자석',
     blurb: 'XP 보석을 끌어당기는 반경이 넓어진다.',
+    // 무제한 ×1.4는 7픽에 반경 632px — 서서 다 빨아들여 "멈춰 서면 충전"과 겹치면
+    // 완전 정지 플레이가 성립한다. 캡 4 = 230px(화면 1/4), 킬존 밖 젬은 걸어가 줍는다.
+    max: 4,
     apply: (s) => (s.magnetRadius *= 1.4),
     info: (s) => `수집 반경 ${Math.round(s.magnetRadius)} → ${Math.round(s.magnetRadius * 1.4)}`,
   },
@@ -415,9 +426,11 @@ class PrototypeScene extends Phaser.Scene {
   private levelKeys: Phaser.Input.Keyboard.Key[] = [];
   private synth = new Synth();
   private sparks!: Phaser.GameObjects.Particles.ParticleEmitter;
+  private telegraph!: Phaser.GameObjects.Graphics;
   private hitstopMs = 0;
   private boss?: Enemy;
   private bossSpawned = false;
+  private bossMaxHp = 1;
   private bossBullets!: Phaser.Physics.Arcade.Group;
   private bossNextVolley = 0;
   private bossBar?: Phaser.GameObjects.Rectangle;
@@ -485,6 +498,9 @@ class PrototypeScene extends Phaser.Scene {
       emitting: false,
     });
     this.sparks.setDepth(5);
+
+    // 돌진자 경로 예고선 레이어 — 매 프레임 clear 후 windup 중인 돌진자마다 그린다.
+    this.telegraph = this.add.graphics().setDepth(1);
 
     // 브라우저 오디오 정책: 첫 입력에서 컨텍스트 활성화.
     this.input.keyboard!.once('keydown', () => this.synth.ensure());
@@ -767,10 +783,12 @@ class PrototypeScene extends Phaser.Scene {
       this.gauge = Math.min(this.gaugeMax, this.gauge + deltaMs / this.gaugeChargeMs);
     }
 
-    const speedMul = Math.min(1.6, 1 + this.elapsedSec() * SPEED_GROWTH);
+    const speedMul = Math.min(1.75, 1 + this.elapsedSec() * SPEED_GROWTH);
     // 플레이어 실제 화면 속도 (물리 역보정 되돌림) — 예측자 리드 조준용.
     const realVelX = this.player.body.velocity.x * this.worldSpeed;
     const realVelY = this.player.body.velocity.y * this.worldSpeed;
+
+    this.telegraph.clear();
 
     // 슬라임 합체 판정: 같은 단계끼리 접촉하면 다음 단계로.
     const slimes = this.enemies.getChildren().filter((o) => (o as Enemy).kind === 'slime') as Enemy[];
@@ -858,16 +876,20 @@ class PrototypeScene extends Phaser.Scene {
         case 'charger': {
           if (enemy.mode === 'windup') {
             enemy.setVelocity(0, 0);
-            // 경고 점멸도 세계 시간 — 불릿타임 중엔 점멸·전환 모두 함께 늦어진다.
-            enemy.setAlpha(0.4 + 0.6 * Math.abs(Math.sin(this.gameNow / 60)));
+            // 조준은 발사 순간까지 플레이어를 따라온다 — 예고선이 곧 실제 경로.
+            // 타이머는 세계 시간: 불릿타임 중엔 예고도 발사도 함께 늦어진다.
+            const aim = new Phaser.Math.Vector2(
+              this.player.x - enemy.x,
+              this.player.y - enemy.y,
+            ).normalize();
+            const reach = CHARGER_CHARGE_SPEED * speedMul * enrageMul * (CHARGER_CHARGE_MS / 1000);
+            this.telegraph.lineStyle(3, 0xff5a5a, 0.5);
+            this.telegraph.lineBetween(enemy.x, enemy.y, enemy.x + aim.x * reach, enemy.y + aim.y * reach);
             if (this.gameNow >= (enemy.modeUntil ?? 0)) {
               enemy.mode = 'charge';
               enemy.modeUntil = this.gameNow + CHARGER_CHARGE_MS;
-              enemy.chargeDir = new Phaser.Math.Vector2(
-                this.player.x - enemy.x,
-                this.player.y - enemy.y,
-              ).normalize();
-              enemy.setAlpha(1);
+              enemy.chargeDir = aim;
+              enemy.setFlipX(aim.x < 0);
             }
           } else if (enemy.mode === 'charge') {
             const d = enemy.chargeDir!;
@@ -922,7 +944,7 @@ class PrototypeScene extends Phaser.Scene {
         }
       }
       this.bossBar?.setPosition(b.x - 30, b.y - 52);
-      this.bossBar?.setSize(60 * Math.max(0, (b.hp ?? 0) / BOSS_HP), 5);
+      this.bossBar?.setSize(60 * Math.max(0, (b.hp ?? 0) / this.bossMaxHp), 5);
     }
     this.bossBullets.getChildren().forEach((obj) => {
       const bullet = obj as Phaser.Types.Physics.Arcade.ImageWithDynamicBody;
@@ -958,6 +980,14 @@ class PrototypeScene extends Phaser.Scene {
         nearest = e;
       }
     });
+    // 보스도 조준 후보 — 빠지면 화살이 잡몹에만 날아가 보스 명중이 우연이 된다.
+    if (this.boss?.active) {
+      const d = Phaser.Math.Distance.Between(this.player.x, this.player.y, this.boss.x, this.boss.y);
+      if (d < best) {
+        best = d;
+        nearest = this.boss;
+      }
+    }
     if (!nearest) return;
     const target = nearest as Enemy;
     const baseAngle = Phaser.Math.Angle.Between(this.player.x, this.player.y, target.x, target.y);
@@ -979,7 +1009,19 @@ class PrototypeScene extends Phaser.Scene {
   private onProjectileHit(proj: Phaser.GameObjects.GameObject, enemy: Enemy) {
     proj.destroy();
     enemy.hp = (enemy.hp ?? 1) - this.damage;
-    if (enemy.hp > 0) return;
+    if (enemy.hp > 0) {
+      // 비살상 타격 피드백 — HP 보정 후엔 다발 타격이 일상이라 "맞긴 했다"가 보여야 한다.
+      // 섬광은 120ms 스로틀: 연사가 몹을 스트로브 조명으로 만드는 것 방지.
+      this.sparks.explode(3, enemy.x, enemy.y);
+      if (this.realNow >= (enemy.flashUntil ?? 0)) {
+        enemy.flashUntil = this.realNow + 120;
+        enemy.setTintFill(0xffffff);
+        this.time.delayedCall(40, () => {
+          if (enemy.active) enemy.clearTint();
+        });
+      }
+      return;
+    }
     const stats =
       enemy.kind === 'slime'
         ? SLIME_STAGES[(enemy.stage ?? 1) - 1]
@@ -1016,7 +1058,9 @@ class PrototypeScene extends Phaser.Scene {
   }
 
   private xpNeed(): number {
-    return 8 + (this.level - 1) * 4;
+    // 선형(8+4L)이던 시절 후반 레벨업이 30초당 6~7회로 가속 — 킬 속도가 초선형이라서.
+    // 제곱 곡선으로 후반 감속: 5분 런 총 14~15레벨. 초반(~L5)은 누적 XP가 기존과 거의 동일.
+    return 6 + this.level * this.level;
   }
 
   private gainXp(amount: number) {
@@ -1142,7 +1186,9 @@ class PrototypeScene extends Phaser.Scene {
     boss.body.setSize(70, 80);
     boss.play('warriorRed-run');
     boss.setDepth(1);
-    boss.hp = BOSS_HP;
+    const dps = (this.projectileCount * this.damage * 1000) / this.fireInterval;
+    boss.hp = Math.max(BOSS_HP_MIN, Math.round(dps * BOSS_FIGHT_SEC));
+    this.bossMaxHp = boss.hp;
     this.boss = boss;
     this.bossNextVolley = this.gameNow + 1500;
     this.bossBar = this.add.rectangle(0, 0, 60, 5, 0xe4573d).setOrigin(0, 0.5).setDepth(12);
@@ -1224,6 +1270,13 @@ class PrototypeScene extends Phaser.Scene {
     return BASE_MIN_DENSITY + Math.floor(this.elapsedSec() / DENSITY_GROWTH_SEC);
   }
 
+  // 시간 경과 HP 보정: 120초마다 스폰 HP +1 (5분 런 최대 +2) — 피해 픽의 존재 이유.
+  // 90초 +3이던 시절엔 안 죽는 몹이 위협 쿼터를 오래 점유해 신규 스폰이 감속,
+  // 화면이 한산해져 박진감이 죽었다. 압박은 밀도·속도가 담당, HP는 양념.
+  private hpBonus(): number {
+    return Math.floor(this.elapsedSec() / 120);
+  }
+
   // 현재 위협 합. 쿼터는 이 값과 비교한다 — 마리 수가 아니라.
   private currentThreat(): number {
     let sum = 0;
@@ -1247,9 +1300,9 @@ class PrototypeScene extends Phaser.Scene {
     // 밸리: 펄스 직후 숨돌림 — 쿼터 충전도 멈춘다.
     if (now < this.valleyUntil) return;
 
-    // 피크: 주기적 웨이브 펄스 — 최소 밀도의 60%를 링으로 한꺼번에.
+    // 피크: 주기적 웨이브 펄스 — 최소 밀도의 75%를 링으로 한꺼번에.
     if (now >= this.nextPulseAt) {
-      const burst = Math.ceil(this.minDensity() * 0.6);
+      const burst = Math.ceil(this.minDensity() * 0.75);
       for (let i = 0; i < burst; i++) {
         const angle = (Math.PI * 2 * i) / burst;
         this.spawnEnemyAt(WIDTH / 2 + Math.cos(angle) * 620, HEIGHT / 2 + Math.sin(angle) * 620);
@@ -1274,7 +1327,8 @@ class PrototypeScene extends Phaser.Scene {
     }
   }
 
-  // 시간에 따라 스폰 구성이 바뀐다: 추적자만 → +예측자(45초) → +탱커(90초) → +돌진자(150초).
+  // 시간에 따라 스폰 구성이 바뀐다: 추적자만 → +예측자(45초) → +탱커(90초) → +돌진자(150초)
+  // → 엘리트전(210초). 마지막 90초는 잡몹 물량전이 아니라 유닛전 — 마리 수는 줄고 개별 몹이 위험.
   private pickKind(): EnemyKind {
     const t = this.elapsedSec();
     const roll = Math.random() * 100;
@@ -1282,7 +1336,9 @@ class PrototypeScene extends Phaser.Scene {
     if (t < 60) return roll < 25 ? 'inter' : 'chaser';
     if (t < 90) return roll < 20 ? 'inter' : roll < 35 ? 'slime' : 'chaser';
     if (t < 150) return roll < 20 ? 'inter' : roll < 35 ? 'slime' : roll < 50 ? 'tank' : 'chaser';
-    return roll < 20 ? 'inter' : roll < 35 ? 'slime' : roll < 48 ? 'tank' : roll < 60 ? 'charger' : 'chaser';
+    if (t < 210)
+      return roll < 20 ? 'inter' : roll < 35 ? 'slime' : roll < 48 ? 'tank' : roll < 60 ? 'charger' : 'chaser';
+    return roll < 25 ? 'inter' : roll < 45 ? 'slime' : roll < 62 ? 'tank' : roll < 78 ? 'charger' : 'chaser';
   }
 
   private spawnEnemy() {
@@ -1301,7 +1357,7 @@ class PrototypeScene extends Phaser.Scene {
     enemy.body.setSize(stats.body, stats.body);
     enemy.play(`${stats.tex}-run`);
     enemy.kind = kind;
-    enemy.hp = stats.hp;
+    enemy.hp = stats.hp + this.hpBonus();
     enemy.mode = 'seek';
     enemy.spawnedAt = this.gameNow;
     if (kind === 'slime') enemy.stage = 1;
@@ -1320,7 +1376,7 @@ class PrototypeScene extends Phaser.Scene {
     merged.play(`${stats.tex}-run`);
     merged.kind = 'slime';
     merged.stage = stage;
-    merged.hp = stats.hp;
+    merged.hp = stats.hp + this.hpBonus();
     merged.mode = 'seek';
     merged.spawnedAt = this.gameNow; // 합체 = 새 개체, 격노 타이머 리셋
     merged.nextShotAt = this.gameNow + 1200;
